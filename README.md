@@ -1,2 +1,3 @@
 # dnspub
-DNS for nostr npubs
+
+DNS Name server for nostr npubs
