@@ -466,7 +466,7 @@ def start_dns_tcp(host="0.0.0.0", port=53):
 # -------------------------------
 def start_dns_server(host="0.0.0.0", port=53):
     settings = Settings()
-    print(settings)
+    print(f" Settings: {settings}")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     # allow quick restart
     try:

@@ -21,7 +21,11 @@ class Settings(BaseSettings):
 #        "wss://relay.primal.net",
 #        "wss://relay.snort.social"
 
+    ZONE: str = "npub.openproof.org."
 
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
 
 settings = Settings()
 
