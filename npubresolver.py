@@ -260,8 +260,13 @@ OVERRIDES = {
     "npub1h9taws9gujwja2weyxzhawfahwqljcm3cs7wjv5vv70dvtx637wsl8rhx0.npub.openproof.org.": {
         "A": ("172.105.26.76", 300),   # <— your Nginx public IPv4
         # only add AAAA if your Nginx listens on 80 over IPv6:
-        # "AAAA": ("2001:db8::1", 300),
-    }
+        # "AAAA": ("2001:db8::1", 300), 
+        },
+    "npub1cwddk7gqlg0l934ensek4ctl7mqg3drd33apv4wg9gr7cnl6gsnsujhrk2.npub.openproof.org.": {
+        "A": ("172.105.26.76", 300),   # <— your Nginx public IPv4
+        # only add AAAA if your Nginx listens on 80 over IPv6:
+        # "AAAA": ("2001:db8::1", 300), 
+        },    
 }
 
 def normalize_name(name: str) -> str:
