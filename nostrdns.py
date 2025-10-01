@@ -8,26 +8,10 @@ from monstr.client.client import Client, ClientPool
 from monstr.event.event import Event
 
 from cache import put_records
+from config import Settings
 
 
-class Settings(BaseSettings):
-    NOSTR_RELAYS: List = [
-          "wss://relay.damus.io"
 
-    ]
-    KIND_DNS: int = 11111 # Custom event kind for “DNS record” (choose any free kind you prefer)
-
-
-#       "wss://relay.damus.io"
-#        "wss://nos.lol",
-#        "wss://relay.primal.net",
-#        "wss://relay.snort.social"
-
-    ZONE: str = "npub.openproof.org."
-
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
 
 settings = Settings()
 

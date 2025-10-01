@@ -1,7 +1,9 @@
 # cache.py
 import sqlite3, time, threading
-from contextlib import contextmanager
+from contextlib import contextmanager, closing
 from typing import Iterable, List, Tuple
+import asyncio
+
 
 # Cache policy
 MAX_CACHE_TTL = 300          # seconds to cap stored TTLs (5 min)
@@ -88,3 +90,4 @@ def get_records(fqdn: str, rtype: str) -> List[Tuple[str, str, int]]:
 def purge_expired(limit: int = 500):
     with _conn() as con:
         con.execute("DELETE FROM rr_cache WHERE expires_at < ?", (_now()-3600,))
+

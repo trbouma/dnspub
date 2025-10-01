@@ -429,7 +429,7 @@ def build_response(req: bytes) -> bytes:
 
         # ---------- NPUB LEAF HANDLING (moved up BEFORE fallback) ----------
         is_npub,nameparts, offset, npub_subdomain = inspect_fqdn_for_npub(fqdn=fqdn)
-        print(f"inspect for npub {is_npub} {nameparts} {offset} {nameparts[offset]} {npub_subdomain}")
+        print(f"inspect for npub {is_npub} {nameparts} {offset} {nameparts[offset]} subdomain: {npub_subdomain}")
         # leftmost = fqdn.split(".", 1)[0]
         
         if is_npub:
