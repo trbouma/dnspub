@@ -51,6 +51,33 @@ def is_valid_npub(label: str) -> bool:
         return decoded is not None and len(decoded) == 32
     except Exception:
         return False
+
+def inspect_fqdn_for_npub(fqdn: str):
+    """
+    Inspect an FQDN for a valid npub label.
+
+    Args:
+        fqdn (str): Fully-qualified domain name (with or without trailing dot).
+
+    Returns:
+        tuple:
+          - is_valid (bool): True if a valid npub was found
+          - labels (list[str]): split fqdn labels
+          - pos (int|None): index of the valid npub in labels, else None
+          - npub_subdomain (str|None): subdomain string left of the npub, else None
+    """
+    # Normalize and strip trailing dot
+    fqdn = fqdn.strip().lower().rstrip(".")
+    labels = fqdn.split(".")
+
+    for idx, label in enumerate(labels):
+        if is_valid_npub(label):  # your existing validator
+            npub_subdomain = ".".join(labels[:idx]) if idx > 0 else None
+            return True, labels, idx, npub_subdomain
+
+    return False, labels, None, None
+
+
 # Zone SOA config
 ZONE   = "npub.openproof.org."
 MNAME  = "ns1.npub.openproof.org."           # primary nameserver
@@ -401,8 +428,12 @@ def build_response(req: bytes) -> bytes:
             return positive_answer(tid, req_flags, question, answers=ans, authorities=auth, aa=True, ra=RA, add_opt=add_opt)
 
         # ---------- NPUB LEAF HANDLING (moved up BEFORE fallback) ----------
-        leftmost = fqdn.split(".", 1)[0]
-        if is_valid_npub(leftmost):
+        is_npub,nameparts, offset, npub_subdomain = inspect_fqdn_for_npub(fqdn=fqdn)
+        print(f"inspect for npub {is_npub} {nameparts} {offset} {nameparts[offset]} {npub_subdomain}")
+        # leftmost = fqdn.split(".", 1)[0]
+        
+        if is_npub:
+            npub_to_use = nameparts[offset]
             # CAA at leaf → clean NODATA
             if qtype == 257:
                 return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
@@ -444,11 +475,11 @@ def build_response(req: bytes) -> bytes:
             # Cold name → one fast ANY fetch + store + serve filtered
             try:
                 try:
-                    tuples_any = asyncio.run(_npub_fetch_all_with_timeout(leftmost))
+                    tuples_any = asyncio.run(_npub_fetch_all_with_timeout(npub_to_use))
                 except RuntimeError:
                     loop = asyncio.new_event_loop()
                     try:
-                        tuples_any = loop.run_until_complete(_npub_fetch_all_with_timeout(leftmost))
+                        tuples_any = loop.run_until_complete(_npub_fetch_all_with_timeout(npub_to_use))
                     finally:
                         loop.close()
             except Exception as e:
@@ -469,7 +500,7 @@ def build_response(req: bytes) -> bytes:
 
                 if answers:
                     auth = zone_ns_authority(zone)
-                    _bg_refresh(leftmost, fqdn)
+                    _bg_refresh(npub_to_use, fqdn)
                     return positive_answer(tid, req_flags, question, answers=answers, authorities=auth, aa=True, ra=RA, add_opt=add_opt)
 
             # Still nothing → authoritative NOERROR/NODATA
