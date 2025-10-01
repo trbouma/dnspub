@@ -2,6 +2,8 @@ from pydantic_settings import BaseSettings
 from typing import List, Tuple, Optional
 
 class Settings(BaseSettings):
+    DEBUG_ALWAYS_RELAY: bool = False   # if True, bypass cache on npub lookups
+    NOSTR_FETCH_TIMEOUT: float = 1.0   # seconds, guardrail
     NOSTR_RELAYS: List = [
         "wss://relay.damus.io",
         "wss://relay.damus.io"
