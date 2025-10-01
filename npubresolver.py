@@ -341,175 +341,149 @@ def build_response(req: bytes) -> bytes:
     qname, qtype, qclass, qend = parse_question(req)
     question = req[12:qend]
 
-    RA = False           # authoritative server: recursion not available
-    add_opt = True       # always add EDNS0 OPT to be friendly with public resolvers
+    RA = False
+    add_opt = True
     fqdn = normalize_name(qname)
 
-    # ---- Hard overrides (for issuance or special hosts) ----
+    # ---- OVERRIDES (unchanged) ----
     recs = OVERRIDES.get(fqdn)
     if recs:
         answers = b""
-
-        # Add any overridden types we *do* have
         if qtype in (1, 255) and "A" in recs:
             answers += rr_a(fqdn, recs["A"][0], int(recs["A"][1]))
         if qtype in (28, 255) and "AAAA" in recs:
             answers += rr_aaaa(fqdn, recs["AAAA"][0], int(recs["AAAA"][1]))
         if qtype in (16, 255) and "TXT" in recs:
             answers += rr_txt(fqdn, str(recs["TXT"][0]), int(recs["TXT"][1]))
-
-        # If AAAA was requested but not overridden -> clean NOERROR/NODATA
         if qtype == 28 and "AAAA" not in recs:
             zone = find_zone(fqdn)
             if zone:
-                return negative_nodata(zone, req_flags, tid, question, add_opt, ra=RA)
-
-        # If we actually built some answers from overrides, return them now
+                return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
         if answers:
             return positive_answer(tid, req_flags, question, answers=answers, aa=True, ra=RA, add_opt=add_opt)
 
-    # Otherwise: DO NOT return NODATA here.
-    # Fall through to normal zone/npub handling so TXT (or other) can be resolved dynamically.
-
-    # Only IN class
+    # ---- Only IN ----
     if qclass != 1:
-        flags = build_flags(req_flags, rcode=4, aa=True, ra=RA)  # NOTIMP for non-IN
+        flags = build_flags(req_flags, rcode=4, aa=True, ra=RA)  # NOTIMP
         header = tid + flags + struct.pack(">HHHH", 1, 0, 0, 1 if add_opt else 0)
         return header + question + (rr_opt() if add_opt else b"")
 
+    # ---- ZONE HANDLING ----
     zone = find_zone(fqdn)
     if zone:
         z = ZONES[zone]
 
-        # ---- Apex SOA ----
-        if fqdn == zone and qtype in (6, 255):  # SOA or ANY
+        # Apex SOA
+        if fqdn == zone and qtype in (6, 255):
             s = z["soa"]
             ans = rr_soa(zone, s["mname"], s["rname"], s["serial"], s["refresh"], s["retry"], s["expire"], s["minimum"], s["ttl"])
             return positive_answer(tid, req_flags, question, answers=ans, aa=True, ra=RA, add_opt=add_opt)
 
-        # ---- Apex NS (+ in-bailiwick glue A in ADDITIONAL) ----
-        if fqdn == zone and qtype in (2, 255):  # NS or ANY
+        # Apex NS (+glue)
+        if fqdn == zone and qtype in (2, 255):
             answers = b"".join(rr_ns(zone, ns) for ns in z["ns"])
             glue_map = z.get("glue_a", {})
             additionals = b"".join(rr_a(h, ip, 3600) for h, ip in glue_map.items() if h in z["ns"])
             return positive_answer(tid, req_flags, question, answers=answers, additionals=additionals, aa=True, ra=RA, add_opt=add_opt)
 
-        # ---- Apex CAA (type 257) ----
+        # Apex CAA
         if fqdn == zone and qtype in (257, 255):
             caa_list = z.get("caa", [])
             if caa_list:
-                answers = b"".join(
-                    rr_caa(zone, flag, tag, val, ttl)
-                    for (flag, tag, val, ttl) in caa_list
-                )
-                return positive_answer(tid, req_flags, question,
-                           answers=answers, aa=True, ra=RA, add_opt=add_opt)
-            # if none configured, return clean NODATA (+SOA), not SERVFAIL:
+                answers = b"".join(rr_caa(zone, flag, tag, val, ttl) for (flag, tag, val, ttl) in caa_list)
+                return positive_answer(tid, req_flags, question, answers=answers, aa=True, ra=RA, add_opt=add_opt)
             return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
-        # ---- In-zone glue host A (e.g., ns1.<zone>.) ----
+
+        # In-zone glue host A
         if qtype in (1, 255) and fqdn in z.get("glue_a", {}):
             ans = rr_a(fqdn, z["glue_a"][fqdn], 3600)
-            # include zone NS in AUTHORITY for non-apex positives
             auth = zone_ns_authority(zone)
             return positive_answer(tid, req_flags, question, answers=ans, authorities=auth, aa=True, ra=RA, add_opt=add_opt)
-        # Fallback for other in-zone types we don't explicitly serve:
-        return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
-       
-    # ---- npub leaf handling (no overrides needed) ----
-    leftmost = fqdn.split(".", 1)[0]
-    if is_valid_npub(leftmost):
-        answers = b""
 
-        # --- figure out which cached types to read for this qtype ---
-        if qtype == 255:  # ANY
-            want_types = ["A", "TXT", "AAAA"]
-        else:
-            want_types = [{1:"A", 16:"TXT", 28:"AAAA"}.get(qtype, None)]
-            want_types = [t for t in want_types if t]
+        # ---------- NPUB LEAF HANDLING (moved up BEFORE fallback) ----------
+        leftmost = fqdn.split(".", 1)[0]
+        if is_valid_npub(leftmost):
+            # CAA at leaf → clean NODATA
+            if qtype == 257:
+                return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
 
-        # If a CAA (257) is asked at a leaf, we don’t synthesize CAA. Return clean NODATA.
-        if qtype == 257:
-            return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
-        # --- read cache for each wanted type ---
-        cached_any = False
-        cached_hit = False
-        cached_types_present = set()
-        for rtype in want_types:
-            cached = get_records(fqdn, rtype)  # -> [(rtype, value, ttl), ...]
-            if cached:
-                cached_hit = True
-                cached_any = True
-                cached_types_present.add(rtype)
-                for _t, val, ttl in cached:
-                    if rtype == "A":
-                        answers += rr_a(fqdn, str(val), int(ttl))
-                    elif rtype == "TXT":
-                        answers += rr_txt(fqdn, str(val), int(ttl))
-                    elif rtype == "AAAA":
-                        answers += rr_aaaa(fqdn, str(val), int(ttl))
+            answers = b""
 
-        # quick check: do we have ANY cached data for this name (regardless of type)?
-        # ask cache for A/TXT/AAAA to decide if the name is "known"
-        if not cached_any:
-            for probe in ("A", "TXT", "AAAA"):
-                if get_records(fqdn, probe):
+            # Cache first (A/TXT/AAAA or ALL for ANY)
+            if qtype == 255:
+                want_types = ["A", "TXT", "AAAA"]
+            else:
+                want_types = [{1:"A", 16:"TXT", 28:"AAAA"}.get(qtype, None)]
+                want_types = [t for t in want_types if t]
+
+            cached_any = False
+            for rtype in want_types:
+                cached = get_records(fqdn, rtype)
+                if cached:
                     cached_any = True
-                    break
-
-        # If we produced answers from cache, return them now (fast path)
-        if answers:
-            auth = zone_ns_authority(zone)
-            return positive_answer(tid, req_flags, question,
-                                answers=answers, authorities=auth,
-                                aa=True, ra=RA, add_opt=add_opt)
-
-        # If the name exists in cache but the requested TYPE is not cached,
-        # do NOT go to relay. Return authoritative NOERROR/NODATA + SOA immediately.
-        if cached_any:
-            return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
-
-        # ---- Cold name (no cache rows at all) → one fast ANY fetch with hard timeout ----
-        try:
-            try:
-                tuples_any = asyncio.run(_npub_fetch_all_with_timeout(leftmost))  # must always return a list
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                try:
-                    tuples_any = loop.run_until_complete(_npub_fetch_all_with_timeout(leftmost))
-                finally:
-                    loop.close()
-        except Exception as e:
-            print(f"[ERR] npub ANY runner: {e}")
-            tuples_any = []
-
-        if tuples_any:
-            # store everything we got
-            put_records(fqdn, tuples_any)
-
-            # filter per qtype
-            if qtype in (1, 255):
-                for t, v, ttl in tuples_any:
-                    if t.upper() == "A":
-                        answers += rr_a(fqdn, str(v), int(ttl))
-            if qtype in (16, 255):
-                for t, v, ttl in tuples_any:
-                    if t.upper() == "TXT":
-                        answers += rr_txt(fqdn, str(v), int(ttl))
-            if qtype in (28, 255):
-                for t, v, ttl in tuples_any:
-                    if t.upper() == "AAAA":
-                        answers += rr_aaaa(fqdn, str(v), int(ttl))
+                    for _t, val, ttl in cached:
+                        if rtype == "A":   answers += rr_a(fqdn, str(val), int(ttl))
+                        if rtype == "TXT": answers += rr_txt(fqdn, str(val), int(ttl))
+                        if rtype == "AAAA":answers += rr_aaaa(fqdn, str(val), int(ttl))
 
             if answers:
                 auth = zone_ns_authority(zone)
-                # optional: background refresh (non-blocking) to keep it warm
-                _bg_refresh(leftmost, fqdn)
-                return positive_answer(tid, req_flags, question,
-                                    answers=answers, authorities=auth,
-                                    aa=True, ra=RA, add_opt=add_opt)
+                return positive_answer(tid, req_flags, question, answers=answers, authorities=auth, aa=True, ra=RA, add_opt=add_opt)
 
-        # Nothing within budget → authoritative NOERROR/NODATA (+ SOA)
+            # is name known in cache at all?
+            if not cached_any:
+                for probe in ("A", "TXT", "AAAA"):
+                    if get_records(fqdn, probe):
+                        cached_any = True
+                        break
+
+            if cached_any:
+                # known name, type not present → NODATA
+                return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
+
+            # Cold name → one fast ANY fetch + store + serve filtered
+            try:
+                try:
+                    tuples_any = asyncio.run(_npub_fetch_all_with_timeout(leftmost))
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    try:
+                        tuples_any = loop.run_until_complete(_npub_fetch_all_with_timeout(leftmost))
+                    finally:
+                        loop.close()
+            except Exception as e:
+                print(f"[ERR] npub ANY runner: {e}")
+                tuples_any = []
+
+            if tuples_any:
+                put_records(fqdn, tuples_any)
+                if qtype in (1, 255):
+                    for t, v, ttl in tuples_any:
+                        if t.upper() == "A":    answers += rr_a(fqdn, str(v), int(ttl))
+                if qtype in (16, 255):
+                    for t, v, ttl in tuples_any:
+                        if t.upper() == "TXT":  answers += rr_txt(fqdn, str(v), int(ttl))
+                if qtype in (28, 255):
+                    for t, v, ttl in tuples_any:
+                        if t.upper() == "AAAA": answers += rr_aaaa(fqdn, str(v), int(ttl))
+
+                if answers:
+                    auth = zone_ns_authority(zone)
+                    _bg_refresh(leftmost, fqdn)
+                    return positive_answer(tid, req_flags, question, answers=answers, authorities=auth, aa=True, ra=RA, add_opt=add_opt)
+
+            # Still nothing → authoritative NOERROR/NODATA
+            return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
+
+        # ---------- END NPUB HANDLING ----------
+
+        # Final in-zone fallback for anything else:
         return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
+
+    # ---- outside our zones → REFUSED (authoritative only) ----
+    flags = build_flags(req_flags, rcode=5, aa=False, ra=RA)
+    header = tid + flags + struct.pack(">HHHH", 1, 0, 0, 1 if add_opt else 0)
+    return header + question + (rr_opt() if add_opt else b"")
 
 
 def count_rrs(rr_blob: bytes) -> int:
