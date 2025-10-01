@@ -378,40 +378,72 @@ def build_response(req: bytes) -> bytes:
         # ---- npub leaf handling (no overrides needed) ----
     leftmost = fqdn.split(".", 1)[0]
     if is_valid_npub(leftmost):
-        # 1) Try cache for requested type first (instant)
-        wanted_type = {1:"A", 16:"TXT", 28:"AAAA"}.get(qtype, None)
         answers = b""
 
-        if wanted_type is not None:
-            cached = get_records(fqdn, wanted_type)
-            if cached:
-                for _, val, ttl in cached:
-                    if wanted_type == "A":
-                        answers += rr_a(fqdn, str(val), int(ttl))
-                    elif wanted_type == "TXT":
-                        answers += rr_txt(fqdn, str(val), int(ttl))
-                    elif wanted_type == "AAAA":
-                        answers += rr_aaaa(fqdn, str(val), int(ttl))
-                if answers:
-                    auth = zone_ns_authority(zone)
-                    return positive_answer(tid, req_flags, question, answers=answers,
-                                        authorities=auth, aa=True, ra=RA, add_opt=add_opt)
+        # --- figure out which cached types to read for this qtype ---
+        if qtype == 255:  # ANY
+            want_types = ["A", "TXT", "AAAA"]
+        else:
+            want_types = [{1:"A", 16:"TXT", 28:"AAAA"}.get(qtype, None)]
+            want_types = [t for t in want_types if t]
 
-        # 2) Cache miss → fast ANY fetch (≤300ms), store, serve
+        # --- read cache for each wanted type ---
+        cached_any = False
+        cached_hit = False
+        cached_types_present = set()
+        for rtype in want_types:
+            cached = get_records(fqdn, rtype)  # -> [(rtype, value, ttl), ...]
+            if cached:
+                cached_hit = True
+                cached_any = True
+                cached_types_present.add(rtype)
+                for _t, val, ttl in cached:
+                    if rtype == "A":
+                        answers += rr_a(fqdn, str(val), int(ttl))
+                    elif rtype == "TXT":
+                        answers += rr_txt(fqdn, str(val), int(ttl))
+                    elif rtype == "AAAA":
+                        answers += rr_aaaa(fqdn, str(val), int(ttl))
+
+        # quick check: do we have ANY cached data for this name (regardless of type)?
+        # ask cache for A/TXT/AAAA to decide if the name is "known"
+        if not cached_any:
+            for probe in ("A", "TXT", "AAAA"):
+                if get_records(fqdn, probe):
+                    cached_any = True
+                    break
+
+        # If we produced answers from cache, return them now (fast path)
+        if answers:
+            auth = zone_ns_authority(zone)
+            return positive_answer(tid, req_flags, question,
+                                answers=answers, authorities=auth,
+                                aa=True, ra=RA, add_opt=add_opt)
+
+        # If the name exists in cache but the requested TYPE is not cached,
+        # do NOT go to relay. Return authoritative NOERROR/NODATA + SOA immediately.
+        if cached_any:
+            return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
+
+        # ---- Cold name (no cache rows at all) → one fast ANY fetch with hard timeout ----
         try:
             try:
-                tuples_any = asyncio.run(_fetch_any_with_timeout(leftmost))
+                tuples_any = asyncio.run(_npub_fetch_all_with_timeout(leftmost))  # must always return a list
             except RuntimeError:
                 loop = asyncio.new_event_loop()
-                tuples_any = loop.run_until_complete(_fetch_any_with_timeout(leftmost))
-                loop.close()
+                try:
+                    tuples_any = loop.run_until_complete(_npub_fetch_all_with_timeout(leftmost))
+                finally:
+                    loop.close()
         except Exception as e:
             print(f"[ERR] npub ANY runner: {e}")
             tuples_any = []
 
         if tuples_any:
+            # store everything we got
             put_records(fqdn, tuples_any)
-            # filter for requested type (and ANY)
+
+            # filter per qtype
             if qtype in (1, 255):
                 for t, v, ttl in tuples_any:
                     if t.upper() == "A":
@@ -427,13 +459,13 @@ def build_response(req: bytes) -> bytes:
 
             if answers:
                 auth = zone_ns_authority(zone)
-                # kick off background refresh to keep cache warm next time
+                # optional: background refresh (non-blocking) to keep it warm
                 _bg_refresh(leftmost, fqdn)
-                return positive_answer(tid, req_flags, question, answers=answers,
-                                    authorities=auth, aa=True, ra=RA, add_opt=add_opt)
+                return positive_answer(tid, req_flags, question,
+                                    answers=answers, authorities=auth,
+                                    aa=True, ra=RA, add_opt=add_opt)
 
-        # 3) Nothing within budget → clean NOERROR/NODATA (+ SOA)
-        # (Optional) if you found grace-stale earlier but didn’t return it, you can still return it here.
+        # Nothing within budget → authoritative NOERROR/NODATA (+ SOA)
         return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
 
 

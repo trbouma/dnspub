@@ -139,10 +139,12 @@ async def _npub_a_first_with_timeout(npub: str, qtype: int):
         return ([], [])
 
 
-async def _npub_fetch_all_with_timeout(npub: str) -> list[tuple[str,str,int]]:
+async def _npub_fetch_all_with_timeout(npub: str) -> list[tuple[str, str, int]]:
     try:
-        return await asyncio.wait_for(lookup_npub_records_tuples(npub, 255),
-                                      timeout=_NPUB_LOOKUP_DEADLINE)
+        return await asyncio.wait_for(
+            lookup_npub_records_tuples(npub, 255),  # ANY
+            timeout=_NPUB_LOOKUP_DEADLINE
+        )
     except Exception as e:
         print(f"[NPUB] ANY fetch failed/timed out for {npub}: {e}")
         return []
