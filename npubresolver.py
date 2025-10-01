@@ -97,15 +97,20 @@ ZONES = {
         },
     },
     "npub.openproof.org.": {
-        "ns": ["ns1.openproof.org."],       # reuse same server
-        "glue_a": {},                       # parent provides glue for ns1.openproof.org
-        "soa": {
-            "mname": "ns1.openproof.org.",
-            "rname": "hostmaster.openproof.org.",
-            "serial": 2025092801,
-            "refresh": 3600, "retry": 600, "expire": 604800, "minimum": 3600, "ttl": 3600
-        },
+    "soa": {  # your existing SOA fields
+        "mname": "ns1.openproof.org.",
+        "rname": "hostmaster.openproof.org.",
+        "serial": 2025092901, "refresh": 3600, "retry": 600, "expire": 604800, "minimum": 3600, "ttl": 3600
     },
+    "ns": ["ns1.openproof.org."],
+    "glue_a": {"ns1.openproof.org.": "15.235.3.226"},
+    # NEW: explicit CAA that authorizes Let's Encrypt and no wildcards by default
+    "caa": [
+        (0, "issue", "letsencrypt.org", 3600),
+        # (0, "issuewild", ";", 3600),  # uncomment if you want to explicitly *deny* wildcards
+        # (0, "iodef", "mailto:hostmaster@openproof.org", 3600),
+    ],
+},
 }
 
 def find_zone(qname: str) -> str | None:
@@ -257,6 +262,27 @@ def rr_soa(qname: str, mname: str, rname: str,
         rdata
     )
 
+def rr_caa(name: str, flag: int, tag: str, value: str, ttl: int) -> bytes:
+    n = encode_name(name)  # your existing encoder
+
+    tag_b = (tag or "").strip().lower().encode("ascii")
+    val_b = (value or "").strip().encode("utf-8")
+
+    if not (1 <= len(tag_b) <= 255):
+        raise ValueError("CAA tag length must be 1..255")
+    if not (0 <= int(flag) <= 255):
+        raise ValueError("CAA flag must be 0..255")
+    # value is raw bytes; no length octet in wire format for CAA
+    # (You may still cap for sanity if you want.)
+    if len(val_b) > 1024:  # arbitrary sanity cap
+        raise ValueError("CAA value unreasonably long")
+
+    # RDATA = flags(1) + taglen(1) + tag + value  (NO value length byte)
+    rdata = struct.pack("!B", int(flag)) + bytes([len(tag_b)]) + tag_b + val_b
+
+    # TYPE=257, CLASS=IN(1), TTL, RDLEN, RDATA
+    return n + struct.pack(">HHI", 257, 1, int(ttl)) + struct.pack(">H", len(rdata)) + rdata
+
 OVERRIDES = {
     "npub1h9taws9gujwja2weyxzhawfahwqljcm3cs7wjv5vv70dvtx637wsl8rhx0.npub.openproof.org.": {
         "A": ("172.105.26.76", 300),   # <— your Nginx public IPv4
@@ -368,14 +394,28 @@ def build_response(req: bytes) -> bytes:
             additionals = b"".join(rr_a(h, ip, 3600) for h, ip in glue_map.items() if h in z["ns"])
             return positive_answer(tid, req_flags, question, answers=answers, additionals=additionals, aa=True, ra=RA, add_opt=add_opt)
 
+        # ---- Apex CAA (type 257) ----
+        if fqdn == zone and qtype in (257, 255):
+            caa_list = z.get("caa", [])
+            if caa_list:
+                answers = b"".join(
+                    rr_caa(zone, flag, tag, val, ttl)
+                    for (flag, tag, val, ttl) in caa_list
+                )
+                return positive_answer(tid, req_flags, question,
+                           answers=answers, aa=True, ra=RA, add_opt=add_opt)
+            # if none configured, return clean NODATA (+SOA), not SERVFAIL:
+            return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
         # ---- In-zone glue host A (e.g., ns1.<zone>.) ----
         if qtype in (1, 255) and fqdn in z.get("glue_a", {}):
             ans = rr_a(fqdn, z["glue_a"][fqdn], 3600)
             # include zone NS in AUTHORITY for non-apex positives
             auth = zone_ns_authority(zone)
             return positive_answer(tid, req_flags, question, answers=ans, authorities=auth, aa=True, ra=RA, add_opt=add_opt)
-
-        # ---- npub leaf handling (no overrides needed) ----
+        # Fallback for other in-zone types we don't explicitly serve:
+        return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
+       
+    # ---- npub leaf handling (no overrides needed) ----
     leftmost = fqdn.split(".", 1)[0]
     if is_valid_npub(leftmost):
         answers = b""
@@ -387,6 +427,9 @@ def build_response(req: bytes) -> bytes:
             want_types = [{1:"A", 16:"TXT", 28:"AAAA"}.get(qtype, None)]
             want_types = [t for t in want_types if t]
 
+        # If a CAA (257) is asked at a leaf, we don’t synthesize CAA. Return clean NODATA.
+        if qtype == 257:
+            return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
         # --- read cache for each wanted type ---
         cached_any = False
         cached_hit = False
