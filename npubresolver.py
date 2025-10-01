@@ -9,11 +9,15 @@ import asyncio
 import signal
 import sys
 
-from nostrdns import npub_to_hex_pubkey, lookup_npub_records, lookup_npub_records_tuples, Settings, lookup_npub_a_first, _npub_a_first_with_timeout, _npub_fetch_all_with_timeout, _fetch_any_with_timeout, _bg_refresh
+from nostrdns import npub_to_hex_pubkey, lookup_npub_records, lookup_npub_records_tuples, Settings, lookup_npub_a_first, _npub_a_first_with_timeout,  _fetch_any_with_timeout, _bg_refresh
+
+from config import Settings
 import urllib.request
 
 
 from cache import init_cache, get_records, put_records, purge_expired
+
+
 init_cache()
 
 
@@ -56,26 +60,99 @@ def inspect_fqdn_for_npub(fqdn: str):
     """
     Inspect an FQDN for a valid npub label.
 
-    Args:
-        fqdn (str): Fully-qualified domain name (with or without trailing dot).
-
     Returns:
-        tuple:
-          - is_valid (bool): True if a valid npub was found
-          - labels (list[str]): split fqdn labels
-          - pos (int|None): index of the valid npub in labels, else None
-          - npub_subdomain (str|None): subdomain string left of the npub, else None
+      (is_valid: bool, labels: list[str], pos: int|None, npub_subdomain: str)
+        - npub_subdomain: '' if apex for this npub, else labels left of npub joined by dots.
     """
-    # Normalize and strip trailing dot
     fqdn = fqdn.strip().lower().rstrip(".")
-    labels = fqdn.split(".")
-
+    labels = fqdn.split(".") if fqdn else []
     for idx, label in enumerate(labels):
-        if is_valid_npub(label):  # your existing validator
-            npub_subdomain = ".".join(labels[:idx]) if idx > 0 else None
-            return True, labels, idx, npub_subdomain
+        if is_valid_npub(label):
+            left = labels[:idx]
+            npub_sub = ".".join(left) if left else ""
+            return True, labels, idx, npub_sub
+    return False, labels, None, ""
 
-    return False, labels, None, None
+def owner_label_for_npub_fqdn(fqdn: str) -> tuple[str, str]:
+    """
+    Return (owner, zone) for a name containing an npub label.
+    owner: '@' if apex-of-this-npub else left-of-npub joined ('www', 'foo.bar', ...)
+    zone : labels right of npub joined (e.g. 'npub.openproof.org')
+    """
+    ok, labels, pos, npub_sub = inspect_fqdn_for_npub(fqdn)
+    if not ok or pos is None:
+        raise ValueError("fqdn does not contain a valid npub label")
+    owner = npub_sub if npub_sub else "@"
+    right = labels[pos + 1 :]
+    if not right:
+        raise ValueError("npub label must have a zone to its right")
+    return owner, ".".join(right)
+
+_MIN_TTL = 30
+_MAX_TTL = 86400
+
+def normalize_owner_tuples(rows, owner_default: str = "@"):
+    """
+    Accept rows in either:
+      - (rtype, owner, value, ttl)
+      - (rtype, value, ttl)  -> owner_default is used
+    Returns a list of (rtype, owner, value, ttl) with TTL clamped and duplicates removed.
+    """
+    out = []
+    for row in rows or []:
+        try:
+            if len(row) == 4:
+                rtype, owner, value, ttl = row
+            elif len(row) == 3:
+                rtype, value, ttl = row
+                owner = owner_default
+            else:
+                continue
+            rtype_u = str(rtype).upper().strip()
+            owner_s = (owner or owner_default).strip() or owner_default
+            value_s = str(value)
+            try:
+                ttl_i = max(_MIN_TTL, min(int(ttl), _MAX_TTL))
+            except Exception:
+                ttl_i = 300
+            if not rtype_u or value_s is None:
+                continue
+            out.append((rtype_u, owner_s, value_s, ttl_i))
+        except Exception:
+            continue
+
+    # de-duplicate by (rtype, owner, value) keeping largest TTL
+    dedup = {}
+    for rtype, owner, value, ttl in out:
+        key = (rtype, owner, value)
+        prev = dedup.get(key)
+        if prev is None or ttl > prev:
+            dedup[key] = ttl
+
+    return [(k[0], k[1], k[2], v) for k, v in dedup.items()]
+
+
+
+async def _npub_fetch_all_with_timeout(npub_label: str, timeout: float | None = None):
+    """
+    Fetch ANY records for an npub from relays with a deadline.
+    Returns normalized list[(rtype, owner, value, ttl)].
+    """
+    settings = Settings()
+    deadline = timeout if timeout is not None else settings.NOSTR_FETCH_TIMEOUT
+    try:
+        raw = await asyncio.wait_for(
+            lookup_npub_records_tuples(npub_label, 255),  # ANY
+            timeout=deadline
+        )
+    except asyncio.TimeoutError:
+        print(f"[NPUB] ANY fetch timeout for {npub_label} after {deadline}s")
+        return []
+    except Exception as e:
+        print(f"[NPUB] ANY fetch failed for {npub_label}: {e}")
+        return []
+
+    return normalize_owner_tuples(raw, owner_default="@")
 
 
 # Zone SOA config
@@ -139,6 +216,8 @@ ZONES = {
     ],
 },
 }
+
+
 
 def find_zone(qname: str) -> str | None:
     """Return the longest matching zone apex for qname."""
@@ -368,11 +447,12 @@ def build_response(req: bytes) -> bytes:
     qname, qtype, qclass, qend = parse_question(req)
     question = req[12:qend]
 
-    RA = False
-    add_opt = True
+    RA = False           # authoritative: no recursion
+    add_opt = True       # add EDNS0 OPT
     fqdn = normalize_name(qname)
+    settings = Settings()
 
-    # ---- OVERRIDES (unchanged) ----
+    # ---- OVERRIDES ----
     recs = OVERRIDES.get(fqdn)
     if recs:
         answers = b""
@@ -382,10 +462,13 @@ def build_response(req: bytes) -> bytes:
             answers += rr_aaaa(fqdn, recs["AAAA"][0], int(recs["AAAA"][1]))
         if qtype in (16, 255) and "TXT" in recs:
             answers += rr_txt(fqdn, str(recs["TXT"][0]), int(recs["TXT"][1]))
+
+        # If AAAA requested but not present in overrides → NOERROR/NODATA
         if qtype == 28 and "AAAA" not in recs:
             zone = find_zone(fqdn)
             if zone:
                 return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
+
         if answers:
             return positive_answer(tid, req_flags, question, answers=answers, aa=True, ra=RA, add_opt=add_opt)
 
@@ -406,11 +489,13 @@ def build_response(req: bytes) -> bytes:
             ans = rr_soa(zone, s["mname"], s["rname"], s["serial"], s["refresh"], s["retry"], s["expire"], s["minimum"], s["ttl"])
             return positive_answer(tid, req_flags, question, answers=ans, aa=True, ra=RA, add_opt=add_opt)
 
-        # Apex NS (+glue)
+        # Apex NS (+ glue A in ADDITIONAL if in-bailiwick)
         if fqdn == zone and qtype in (2, 255):
             answers = b"".join(rr_ns(zone, ns) for ns in z["ns"])
             glue_map = z.get("glue_a", {})
-            additionals = b"".join(rr_a(h, ip, 3600) for h, ip in glue_map.items() if h in z["ns"])
+            additionals = b"".join(
+                rr_a(h, ip, 3600) for h, ip in glue_map.items() if h in z["ns"]
+            )
             return positive_answer(tid, req_flags, question, answers=answers, additionals=additionals, aa=True, ra=RA, add_opt=add_opt)
 
         # Apex CAA
@@ -421,89 +506,146 @@ def build_response(req: bytes) -> bytes:
                 return positive_answer(tid, req_flags, question, answers=answers, aa=True, ra=RA, add_opt=add_opt)
             return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
 
-        # In-zone glue host A
+        # In-zone glue host A (e.g., ns1.<zone>.)
         if qtype in (1, 255) and fqdn in z.get("glue_a", {}):
             ans = rr_a(fqdn, z["glue_a"][fqdn], 3600)
             auth = zone_ns_authority(zone)
             return positive_answer(tid, req_flags, question, answers=ans, authorities=auth, aa=True, ra=RA, add_opt=add_opt)
 
-        # ---------- NPUB LEAF HANDLING (moved up BEFORE fallback) ----------
-        is_npub,nameparts, offset, npub_subdomain = inspect_fqdn_for_npub(fqdn=fqdn)
-        print(f"inspect for npub {is_npub} {nameparts} {offset} {nameparts[offset]} subdomain: {npub_subdomain}")
-        # leftmost = fqdn.split(".", 1)[0]
-        
+        # ---------- NPUB LEAF HANDLING (owner-label aware + debug-always-relay) ----------
+        is_npub, nameparts, offset, npub_subdomain = inspect_fqdn_for_npub(fqdn=fqdn)
         if is_npub:
-            npub_to_use = nameparts[offset]
+            npub_label = nameparts[offset]
+            owner_for_qname = npub_subdomain if npub_subdomain else "@"
+
             # CAA at leaf → clean NODATA
             if qtype == 257:
                 return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
 
             answers = b""
 
-            # Cache first (A/TXT/AAAA or ALL for ANY)
+            # Which types do we answer?
             if qtype == 255:
                 want_types = ["A", "TXT", "AAAA"]
             else:
-                want_types = [{1:"A", 16:"TXT", 28:"AAAA"}.get(qtype, None)]
+                want_types = [{1: "A", 16: "TXT", 28: "AAAA"}.get(qtype, None)]
                 want_types = [t for t in want_types if t]
 
+            # === DEBUG: always hit relays (bypass cache) ===
+            if settings.DEBUG_ALWAYS_RELAY:
+                try:
+                    try:
+                        tuples_any = asyncio.run(_npub_fetch_all_with_timeout(npub_label, settings.NOSTR_FETCH_TIMEOUT))
+                    except RuntimeError:
+                        loop = asyncio.new_event_loop()
+                        try:
+                            tuples_any = loop.run_until_complete(_npub_fetch_all_with_timeout(npub_label, settings.NOSTR_FETCH_TIMEOUT))
+                        finally:
+                            loop.close()
+                except Exception as e:
+                    print(f"[DEBUG/FETCH] relay fetch failed for {fqdn}: {e}")
+                    tuples_any = []
+
+                normalized = normalize_owner_tuples(tuples_any, owner_default="@")
+
+                if normalized:
+                    # refresh cache even in debug to keep warm
+                    put_records(fqdn, normalized)
+
+                    for rtype, rec_owner, val, ttl in normalized:
+                        if rec_owner != owner_for_qname:
+                            continue
+                        if qtype in (1, 255) and rtype == "A":
+                            answers += rr_a(fqdn, str(val), int(ttl))
+                        elif qtype in (16, 255) and rtype == "TXT":
+                            answers += rr_txt(fqdn, str(val), int(ttl))
+                        elif qtype in (28, 255) and rtype == "AAAA":
+                            answers += rr_aaaa(fqdn, str(val), int(ttl))
+
+                if answers:
+                    auth = zone_ns_authority(zone)
+                    return positive_answer(tid, req_flags, question,
+                                           answers=answers, authorities=auth,
+                                           aa=True, ra=RA, add_opt=add_opt)
+                # Nothing from relay → NODATA for this exact owner
+                return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
+
+            # === Normal path: cache first, then single relay fetch if cold ===
+
+            # 1) Cache for requested types (filter by owner)
             cached_any = False
             for rtype in want_types:
-                cached = get_records(fqdn, rtype)
-                if cached:
-                    cached_any = True
-                    for _t, val, ttl in cached:
-                        if rtype == "A":   answers += rr_a(fqdn, str(val), int(ttl))
-                        if rtype == "TXT": answers += rr_txt(fqdn, str(val), int(ttl))
-                        if rtype == "AAAA":answers += rr_aaaa(fqdn, str(val), int(ttl))
+                cached = get_records(fqdn, rtype)  # may be 3- or 4-tuples
+                if not cached:
+                    continue
+                cached_any = True
+                for row in cached:
+                    if len(row) == 4:
+                        _t, rec_owner, val, ttl = row
+                    else:
+                        _t, val, ttl = row
+                        rec_owner = "@"
+                    if rec_owner != owner_for_qname:
+                        continue
+                    if rtype == "A":
+                        answers += rr_a(fqdn, str(val), int(ttl))
+                    elif rtype == "TXT":
+                        answers += rr_txt(fqdn, str(val), int(ttl))
+                    elif rtype == "AAAA":
+                        answers += rr_aaaa(fqdn, str(val), int(ttl))
 
             if answers:
                 auth = zone_ns_authority(zone)
-                return positive_answer(tid, req_flags, question, answers=answers, authorities=auth, aa=True, ra=RA, add_opt=add_opt)
+                return positive_answer(tid, req_flags, question,
+                                       answers=answers, authorities=auth,
+                                       aa=True, ra=RA, add_opt=add_opt)
 
-            # is name known in cache at all?
+            # 2) If the name exists in cache (any type) but not the requested type → NODATA
             if not cached_any:
                 for probe in ("A", "TXT", "AAAA"):
                     if get_records(fqdn, probe):
                         cached_any = True
                         break
-
             if cached_any:
-                # known name, type not present → NODATA
                 return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
 
-            # Cold name → one fast ANY fetch + store + serve filtered
+            # 3) Cold name → one relay fetch, store, serve filtered by owner+type
             try:
                 try:
-                    tuples_any = asyncio.run(_npub_fetch_all_with_timeout(npub_to_use))
+                    tuples_any = asyncio.run(_npub_fetch_all_with_timeout(npub_label, settings.NOSTR_FETCH_TIMEOUT))
                 except RuntimeError:
                     loop = asyncio.new_event_loop()
                     try:
-                        tuples_any = loop.run_until_complete(_npub_fetch_all_with_timeout(npub_to_use))
+                        tuples_any = loop.run_until_complete(_npub_fetch_all_with_timeout(npub_label, settings.NOSTR_FETCH_TIMEOUT))
                     finally:
                         loop.close()
             except Exception as e:
                 print(f"[ERR] npub ANY runner: {e}")
                 tuples_any = []
 
-            if tuples_any:
-                put_records(fqdn, tuples_any)
-                if qtype in (1, 255):
-                    for t, v, ttl in tuples_any:
-                        if t.upper() == "A":    answers += rr_a(fqdn, str(v), int(ttl))
-                if qtype in (16, 255):
-                    for t, v, ttl in tuples_any:
-                        if t.upper() == "TXT":  answers += rr_txt(fqdn, str(v), int(ttl))
-                if qtype in (28, 255):
-                    for t, v, ttl in tuples_any:
-                        if t.upper() == "AAAA": answers += rr_aaaa(fqdn, str(v), int(ttl))
+            normalized = normalize_owner_tuples(tuples_any, owner_default="@")
+
+            if normalized:
+                put_records(fqdn, normalized)
+
+                for rtype, rec_owner, val, ttl in normalized:
+                    if rec_owner != owner_for_qname:
+                        continue
+                    if qtype in (1, 255) and rtype == "A":
+                        answers += rr_a(fqdn, str(val), int(ttl))
+                    elif qtype in (16, 255) and rtype == "TXT":
+                        answers += rr_txt(fqdn, str(val), int(ttl))
+                    elif qtype in (28, 255) and rtype == "AAAA":
+                        answers += rr_aaaa(fqdn, str(val), int(ttl))
 
                 if answers:
                     auth = zone_ns_authority(zone)
-                    _bg_refresh(npub_to_use, fqdn)
-                    return positive_answer(tid, req_flags, question, answers=answers, authorities=auth, aa=True, ra=RA, add_opt=add_opt)
+                    _bg_refresh(npub_label, fqdn)
+                    return positive_answer(tid, req_flags, question,
+                                           answers=answers, authorities=auth,
+                                           aa=True, ra=RA, add_opt=add_opt)
 
-            # Still nothing → authoritative NOERROR/NODATA
+            # 4) Still nothing → NOERROR/NODATA (+SOA)
             return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
 
         # ---------- END NPUB HANDLING ----------
@@ -511,11 +653,10 @@ def build_response(req: bytes) -> bytes:
         # Final in-zone fallback for anything else:
         return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
 
-    # ---- outside our zones → REFUSED (authoritative only) ----
+    # ---- Outside our zones → REFUSED ----
     flags = build_flags(req_flags, rcode=5, aa=False, ra=RA)
     header = tid + flags + struct.pack(">HHHH", 1, 0, 0, 1 if add_opt else 0)
     return header + question + (rr_opt() if add_opt else b"")
-
 
 def count_rrs(rr_blob: bytes) -> int:
     i = 0; cnt = 0
