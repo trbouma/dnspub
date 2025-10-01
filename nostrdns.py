@@ -1,4 +1,4 @@
-import asyncio
+import asyncio, threading
 import json
 import bech32  # for npub -> pubkey
 from typing import List, Tuple, Optional
@@ -6,6 +6,8 @@ from pydantic_settings import BaseSettings
 
 from monstr.client.client import Client, ClientPool
 from monstr.event.event import Event
+
+from cache import put_records
 
 
 class Settings(BaseSettings):
@@ -107,7 +109,28 @@ _QTYPE_TO_STR = {
     255: "ANY",
 }
 
-_NPUB_LOOKUP_DEADLINE = 2.00  # seconds
+_NPUB_LOOKUP_DEADLINE = 2  # 300 msec budget
+
+async def _fetch_any_with_timeout(npub: str):
+    try:
+        return await asyncio.wait_for(lookup_npub_records_tuples(npub, 255),
+                                      timeout=_NPUB_LOOKUP_DEADLINE)
+    except Exception as e:
+        print(f"[NPUB] fetch ANY failed/timed out: {e}")
+        return []
+    
+def _bg_refresh(npub: str, fqdn: str):
+    # small background refresher; non-blocking for query path
+    def _run():
+        try:
+            loop = asyncio.new_event_loop()
+            tuples = loop.run_until_complete(_fetch_any_with_timeout(npub))
+            loop.close()
+            if tuples:
+                put_records(fqdn, tuples)
+        except Exception as e:
+            print(f"[NPUB] bg refresh error: {e}")
+    threading.Thread(target=_run, daemon=True).start()
 
 async def _npub_a_first_with_timeout(npub: str, qtype: int):
     try:
@@ -116,13 +139,8 @@ async def _npub_a_first_with_timeout(npub: str, qtype: int):
         return ([], [])
 
 
-async def _npub_fetch_all_with_timeout(npub: str):
-    """
-    Get ALL tuples for an npub (using qtype=255/ANY) with a strict timeout.
-    Returns a list of (rtype, value, ttl).
-    """
+async def _npub_fetch_all_with_timeout(npub: str) -> list[tuple[str,str,int]]:
     try:
-        # Reuse your existing function but force ANY so we don’t miss data
         return await asyncio.wait_for(lookup_npub_records_tuples(npub, 255),
                                       timeout=_NPUB_LOOKUP_DEADLINE)
     except Exception as e:
@@ -137,6 +155,7 @@ async def lookup_npub_a_first(npub: str, want_qtype: int):
     """
     print(f"[A-FIRST] npub={npub} want_qtype={want_qtype}")
     npub_hex = npub_to_hex_pubkey(npub)
+    events = []
 
     FILTER = [{
         'limit': 64,
@@ -363,6 +382,7 @@ async def lookup_npub_records(npub: str, qtype: int):
     # --- for now, just stub behavior ---
     print(f"[STUB] Would query Nostr relay for npub={npub}, qtype={qtype}")
     npub_hex = npub_to_hex_pubkey(npub)
+    events = []
    
 
     FILTER = [{
@@ -404,6 +424,7 @@ async def lookup_npub_records_tuples(npub: str, qtype: int):
     """
     print(f"[STUB] Would query Nostr relay for npub={npub}, qtype={qtype}")
     npub_hex = npub_to_hex_pubkey(npub)
+    events = []
 
     FILTER = [{
         'limit': 64,

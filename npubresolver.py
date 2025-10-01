@@ -9,11 +9,12 @@ import asyncio
 import signal
 import sys
 
-from nostrdns import npub_to_hex_pubkey, lookup_npub_records, lookup_npub_records_tuples, Settings, lookup_npub_a_first, _npub_a_first_with_timeout, _npub_fetch_all_with_timeout
+from nostrdns import npub_to_hex_pubkey, lookup_npub_records, lookup_npub_records_tuples, Settings, lookup_npub_a_first, _npub_a_first_with_timeout, _npub_fetch_all_with_timeout, _fetch_any_with_timeout, _bg_refresh
 import urllib.request
 
 
-
+from cache import init_cache, get_records, put_records, purge_expired
+init_cache()
 
 
 def get_public_ip() -> str:
@@ -375,54 +376,65 @@ def build_response(req: bytes) -> bytes:
             return positive_answer(tid, req_flags, question, answers=ans, authorities=auth, aa=True, ra=RA, add_opt=add_opt)
 
         # ---- npub leaf handling (no overrides needed) ----
-        leftmost = fqdn.split(".", 1)[0]
-        if is_valid_npub(leftmost):
-            # A-first lookup (single relay walk, then filter by qtype)
-            try:
-                try:
-                    a_recs, wanted_recs = asyncio.run(lookup_npub_a_first(leftmost, qtype))
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    try:
-                        a_recs, wanted_recs = loop.run_until_complete(lookup_npub_a_first(leftmost, qtype))
-                    finally:
-                        loop.close()
-            except Exception as e:
-                print(f"[ERR] npub lookup: {e}")
-                a_recs, wanted_recs = [], []
+    leftmost = fqdn.split(".", 1)[0]
+    if is_valid_npub(leftmost):
+        # 1) Try cache for requested type first (instant)
+        wanted_type = {1:"A", 16:"TXT", 28:"AAAA"}.get(qtype, None)
+        answers = b""
 
-            answers = b""
-
-            # Build only what was requested (but always tried to fetch A first)
-            if qtype in (1, 255):    # A
-                for rtype, val, ttl in a_recs:
-                    if rtype == "A":
+        if wanted_type is not None:
+            cached = get_records(fqdn, wanted_type)
+            if cached:
+                for _, val, ttl in cached:
+                    if wanted_type == "A":
                         answers += rr_a(fqdn, str(val), int(ttl))
-            if qtype in (16, 255):   # TXT
-                for rtype, val, ttl in wanted_recs:
-                    if rtype == "TXT":
+                    elif wanted_type == "TXT":
                         answers += rr_txt(fqdn, str(val), int(ttl))
-            if qtype in (28, 255):   # AAAA
-                for rtype, val, ttl in wanted_recs:
-                    if rtype == "AAAA":
+                    elif wanted_type == "AAAA":
                         answers += rr_aaaa(fqdn, str(val), int(ttl))
+                if answers:
+                    auth = zone_ns_authority(zone)
+                    return positive_answer(tid, req_flags, question, answers=answers,
+                                        authorities=auth, aa=True, ra=RA, add_opt=add_opt)
+
+        # 2) Cache miss → fast ANY fetch (≤300ms), store, serve
+        try:
+            try:
+                tuples_any = asyncio.run(_fetch_any_with_timeout(leftmost))
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                tuples_any = loop.run_until_complete(_fetch_any_with_timeout(leftmost))
+                loop.close()
+        except Exception as e:
+            print(f"[ERR] npub ANY runner: {e}")
+            tuples_any = []
+
+        if tuples_any:
+            put_records(fqdn, tuples_any)
+            # filter for requested type (and ANY)
+            if qtype in (1, 255):
+                for t, v, ttl in tuples_any:
+                    if t.upper() == "A":
+                        answers += rr_a(fqdn, str(v), int(ttl))
+            if qtype in (16, 255):
+                for t, v, ttl in tuples_any:
+                    if t.upper() == "TXT":
+                        answers += rr_txt(fqdn, str(v), int(ttl))
+            if qtype in (28, 255):
+                for t, v, ttl in tuples_any:
+                    if t.upper() == "AAAA":
+                        answers += rr_aaaa(fqdn, str(v), int(ttl))
 
             if answers:
-                # include zone NS in AUTHORITY for non-apex answers
                 auth = zone_ns_authority(zone)
-                return positive_answer(tid, req_flags, question, answers=answers, authorities=auth, aa=True, ra=RA, add_opt=add_opt)
+                # kick off background refresh to keep cache warm next time
+                _bg_refresh(leftmost, fqdn)
+                return positive_answer(tid, req_flags, question, answers=answers,
+                                    authorities=auth, aa=True, ra=RA, add_opt=add_opt)
 
-            # Clean negatives (authoritative) — never SERVFAIL for in-zone names:
-            # If AAAA was asked and none exists, or TXT/A missing → NOERROR/NODATA + SOA
-            return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
-
-        # ---- Non-npub name under our zone → authoritative NODATA ----
+        # 3) Nothing within budget → clean NOERROR/NODATA (+ SOA)
+        # (Optional) if you found grace-stale earlier but didn’t return it, you can still return it here.
         return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
-
-    # Outside our zones → REFUSED (pure authoritative; no forwarding)
-    flags = build_flags(req_flags, rcode=5, aa=False, ra=RA)
-    header = tid + flags + struct.pack(">HHHH", 1, 0, 0, 1 if add_opt else 0)
-    return header + question + (rr_opt() if add_opt else b"")
 
 
 def count_rrs(rr_blob: bytes) -> int:
