@@ -9,7 +9,7 @@ import asyncio
 import signal
 import sys
 
-from nostrdns import npub_to_hex_pubkey, lookup_npub_records, lookup_npub_records_tuples, Settings, lookup_npub_a_first, _npub_a_first_with_timeout, _npub_fetch_all_with_timeout, _fetch_any_with_timeout, _bg_refresh
+from nostrdns import npub_to_hex_pubkey, lookup_npub_records, lookup_npub_records_tuples, Settings, lookup_npub_a_first, _npub_a_first_with_timeout, _npub_fetch_all_with_timeout, _fetch_any_with_timeout, _bg_refresh, fetch_any_sync
 import urllib.request
 
 from settings import Settings, get_settings
@@ -481,35 +481,28 @@ def build_response(req: bytes) -> bytes:
                     return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
 
             # Cold name → one fast ANY fetch + store + serve filtered
-            try:
-                try:
-                    tuples_any = asyncio.run(_npub_fetch_all_with_timeout(npub_to_use))
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    try:
-                        tuples_any = loop.run_until_complete(_npub_fetch_all_with_timeout(npub_to_use))
-                    finally:
-                        loop.close()
-            except Exception as e:
-                print(f"[ERR] npub ANY runner: {e}")
-                tuples_any = []
+            tuples_any = fetch_any_sync(npub_to_use, settings.NOSTR_FETCH_TIMEOUT)
 
             if tuples_any:
                 put_records(fqdn, tuples_any)
                 if qtype in (1, 255):
                     for t, v, ttl in tuples_any:
-                        if t.upper() == "A":    answers += rr_a(fqdn, str(v), int(ttl))
+                        if t.upper() == "A":
+                            answers += rr_a(fqdn, str(v), int(ttl))
                 if qtype in (16, 255):
                     for t, v, ttl in tuples_any:
-                        if t.upper() == "TXT":  answers += rr_txt(fqdn, str(v), int(ttl))
+                        if t.upper() == "TXT":
+                            answers += rr_txt(fqdn, str(v), int(ttl))
                 if qtype in (28, 255):
                     for t, v, ttl in tuples_any:
-                        if t.upper() == "AAAA": answers += rr_aaaa(fqdn, str(v), int(ttl))
+                        if t.upper() == "AAAA":
+                            answers += rr_aaaa(fqdn, str(v), int(ttl))
 
                 if answers:
                     auth = zone_ns_authority(zone)
-                    _bg_refresh(npub_to_use, fqdn)
-                    return positive_answer(tid, req_flags, question, answers=answers, authorities=auth, aa=True, ra=RA, add_opt=add_opt)
+                    # optional: _bg_refresh(npub_to_use, fqdn) — you can disable this while stabilizing
+                    return positive_answer(tid, req_flags, question, answers=answers,
+                                        authorities=auth, aa=True, ra=RA, add_opt=add_opt)
 
             # Still nothing → authoritative NOERROR/NODATA
             return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)

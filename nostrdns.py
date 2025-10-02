@@ -482,5 +482,17 @@ def parse_into_dns_records(raw_records):
         })
     return records
 
+def fetch_any_sync(npub: str, timeout: float) -> list[tuple[str, str, int]]:
+    """
+    Synchronously fetch ALL (A/TXT/AAAA...) tuples for an npub.
+    Creates its own event loop via asyncio.run(), with a hard timeout.
+    """
+    async def _run():
+        return await asyncio.wait_for(lookup_npub_records_tuples(npub, 255), timeout=timeout)  # 255 = ANY
 
+    try:
+        return asyncio.run(_run())
+    except Exception as e:
+        print(f"[NPUB] ANY fetch failed/timed out: {e}")
+        return []
 
