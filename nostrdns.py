@@ -8,12 +8,12 @@ from monstr.client.client import Client, ClientPool
 from monstr.event.event import Event
 
 from cache import put_records
-from config import Settings
+from settings import Settings, get_settings
 
 
 
 
-settings = Settings()
+settings = get_settings()
 
 # ---------------------------
 # Helpers

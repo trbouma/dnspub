@@ -12,8 +12,9 @@ import sys
 from nostrdns import npub_to_hex_pubkey, lookup_npub_records, lookup_npub_records_tuples, Settings, lookup_npub_a_first, _npub_a_first_with_timeout, _npub_fetch_all_with_timeout, _fetch_any_with_timeout, _bg_refresh
 import urllib.request
 
-
+from settings import Settings, get_settings
 from cache import init_cache, get_records, put_records, purge_expired
+settings = get_settings()
 init_cache()
 
 
@@ -23,6 +24,7 @@ def get_public_ip() -> str:
             return resp.read().decode().strip()
     except Exception:
         return "127.0.0.1"  # fallback
+
 
 # ---- logging ----
 logging.basicConfig(
@@ -139,6 +141,10 @@ ZONES = {
     ],
 },
 }
+
+def should_use_cache() -> bool:
+    # Read cache only if it’s enabled and we’re not in “always relay” mode
+    return settings.CACHE_ACTIVATED and not settings.DEBUG_ALWAYS_RELAY
 
 def find_zone(qname: str) -> str | None:
     """Return the longest matching zone apex for qname."""
@@ -447,30 +453,32 @@ def build_response(req: bytes) -> bytes:
                 want_types = [{1:"A", 16:"TXT", 28:"AAAA"}.get(qtype, None)]
                 want_types = [t for t in want_types if t]
 
-            cached_any = False
-            for rtype in want_types:
-                cached = get_records(fqdn, rtype)
-                if cached:
-                    cached_any = True
-                    for _t, val, ttl in cached:
-                        if rtype == "A":   answers += rr_a(fqdn, str(val), int(ttl))
-                        if rtype == "TXT": answers += rr_txt(fqdn, str(val), int(ttl))
-                        if rtype == "AAAA":answers += rr_aaaa(fqdn, str(val), int(ttl))
-
-            if answers:
-                auth = zone_ns_authority(zone)
-                return positive_answer(tid, req_flags, question, answers=answers, authorities=auth, aa=True, ra=RA, add_opt=add_opt)
-
-            # is name known in cache at all?
-            if not cached_any:
-                for probe in ("A", "TXT", "AAAA"):
-                    if get_records(fqdn, probe):
+            
+            if settings.CACHE_ACTIVATED: 
+                cached_any = False
+                for rtype in want_types:
+                    cached = get_records(fqdn, rtype)
+                    if cached:
                         cached_any = True
-                        break
+                        for _t, val, ttl in cached:
+                            if rtype == "A":   answers += rr_a(fqdn, str(val), int(ttl))
+                            if rtype == "TXT": answers += rr_txt(fqdn, str(val), int(ttl))
+                            if rtype == "AAAA":answers += rr_aaaa(fqdn, str(val), int(ttl))
 
-            if cached_any:
-                # known name, type not present → NODATA
-                return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
+                if answers:
+                    auth = zone_ns_authority(zone)
+                    return positive_answer(tid, req_flags, question, answers=answers, authorities=auth, aa=True, ra=RA, add_opt=add_opt)
+
+                # is name known in cache at all?
+                if not cached_any:
+                    for probe in ("A", "TXT", "AAAA"):
+                        if get_records(fqdn, probe):
+                            cached_any = True
+                            break
+
+                if cached_any:
+                    # known name, type not present → NODATA
+                    return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
 
             # Cold name → one fast ANY fetch + store + serve filtered
             try:
