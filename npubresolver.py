@@ -5,7 +5,7 @@ import logging
 from monstr.encrypt import Keys
 import bech32
 import asyncio
-
+from typing import Tuple
 import signal
 import sys
 
@@ -54,7 +54,7 @@ def is_valid_npub(label: str) -> bool:
     except Exception:
         return False
 
-def inspect_fqdn_for_npub(fqdn: str):
+def inspect_fqdn_for_npub(fqdn: str) -> Tuple[bool, str, int, str]: 
     """
     Inspect an FQDN for a valid npub label.
 
@@ -155,6 +155,42 @@ def find_zone(qname: str) -> str | None:
             best = zone
     return best
 
+def find_zone_2(qname: str) -> str | None:
+    """Return the longest matching zone apex for qname."""
+    q = qname.rstrip(".") + "."
+    best = None
+    for zone in ZONES.keys():
+        if q.endswith(zone) and (best is None or len(zone) > len(best)):
+            best = zone
+    if best:
+        return best, ZONES.get(best)
+    else:    
+        valid_npub, labels,pos, subdomain = inspect_fqdn_for_npub(fqdn=qname)
+        if valid_npub:
+            npub_zone = zone = ".".join(labels[pos+1:]) + "."
+            print(f"The npub zone is: {npub_zone}")
+            print(f"{valid_npub} {labels} {pos} {subdomain}")
+
+            fake_zone_info = {
+                            "soa": {  # your existing SOA fields
+                            "mname": f"ns1.{npub_zone}",
+                            "rname": f"hostmaster.{npub_zone}",
+                            "serial": 2025092901, "refresh": 3600, "retry": 600, "expire": 604800, "minimum": 3600, "ttl": 3600
+                                    },
+                            "ns": [f"ns1.{npub_zone}"],
+                            "glue_a": {f"ns1.{npub_zone}": f"{get_public_ip()}"},
+                            # NEW: explicit CAA that authorizes Let's Encrypt and no wildcards by default
+                            "caa": [
+                                (0, "issue", "letsencrypt.org", 3600),
+                                # (0, "issuewild", ";", 3600),  # uncomment if you want to explicitly *deny* wildcards
+                                # (0, "iodef", f"mailto:hostmaster@{npub_zone}", 3600),
+                            ],
+                        }
+            ZONES[npub_zone] = fake_zone_info
+            print(f"fake_zone: {fake_zone_info}")
+            return npub_zone, fake_zone_info
+        
+        return None, None
 
 
 # -------------------------------
@@ -404,7 +440,9 @@ def build_response(req: bytes) -> bytes:
         return header + question + (rr_opt() if add_opt else b"")
 
     # ---- ZONE HANDLING ----
-    zone = find_zone(fqdn)
+    # zone = find_zone(fqdn)
+    zone, z = find_zone_2(fqdn)
+    print(f"for {fqdn} zone is {zone} and the z is: {z}")
     if zone:
         z = ZONES[zone]
 

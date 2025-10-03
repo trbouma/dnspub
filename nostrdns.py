@@ -422,7 +422,7 @@ async def lookup_npub_records_tuples(npub: str, qtype: int):
     tuples: list[tuple[str, str, int]] = []
 
     async with ClientPool(settings.NOSTR_RELAYS) as c:
-    # async with Client(settings.NOSTR_RELAYS[0]) as c:
+   
 
         try:
             events = await c.query(FILTER)
