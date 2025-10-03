@@ -9,7 +9,7 @@ import asyncio
 import signal
 import sys
 
-from nostrdns import npub_to_hex_pubkey, lookup_npub_records, lookup_npub_records_tuples, Settings, lookup_npub_a_first, _npub_a_first_with_timeout, _npub_fetch_all_with_timeout, _fetch_any_with_timeout, _bg_refresh, fetch_any_sync
+from nostrdns import npub_to_hex_pubkey, lookup_npub_records, lookup_npub_records_tuples, Settings, lookup_npub_a_first, _npub_a_first_with_timeout, _npub_fetch_all_with_timeout, _fetch_any_with_timeout, _bg_refresh, fetch_any_sync, fetch_any_sync_2
 import urllib.request
 
 from settings import Settings, get_settings
@@ -319,6 +319,7 @@ def rr_caa(name: str, flag: int, tag: str, value: str, ttl: int) -> bytes:
 OVERRIDES = {
     "npub1h9taws9gujwja2weyxzhawfahwqljcm3cs7wjv5vv70dvtx637wsl8rhx0.npub.openproof.org.": {
         "A": ("172.105.26.76", 300),   # <— your Nginx public IPv4
+        "TXT": ("this is a test override text", 300),
         # only add AAAA if your Nginx listens on 80 over IPv6:
         # "AAAA": ("2001:db8::1", 300), 
         },
@@ -381,6 +382,7 @@ def build_response(req: bytes) -> bytes:
     # ---- OVERRIDES (unchanged) ----
     recs = OVERRIDES.get(fqdn)
     if recs:
+        print("providing an override record!")
         answers = b""
         if qtype in (1, 255) and "A" in recs:
             answers += rr_a(fqdn, recs["A"][0], int(recs["A"][1]))
@@ -481,7 +483,8 @@ def build_response(req: bytes) -> bytes:
                     return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
 
             # Cold name → one fast ANY fetch + store + serve filtered
-            tuples_any = fetch_any_sync(npub_to_use, settings.NOSTR_FETCH_TIMEOUT)
+            tuples_any = asyncio.run(fetch_any_sync_2(npub_to_use, settings.NOSTR_FETCH_TIMEOUT))
+            
 
             if tuples_any:
                 put_records(fqdn, tuples_any)
@@ -573,7 +576,7 @@ def start_dns_server(host="0.0.0.0", port=53):
         pass
     sock.bind((host, port))
     # allow loop to wake up and handle shutdown
-    sock.settimeout(1.0)
+    # sock.settimeout(1.0)
 
     print(f"[DNS] listening on {host}:{port} (UDP)")
 

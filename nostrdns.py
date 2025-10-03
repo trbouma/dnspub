@@ -417,15 +417,27 @@ async def lookup_npub_records_tuples(npub: str, qtype: int):
         'authors': [npub_hex],
         'kinds': [settings.KIND_DNS]
     }]
-    print(f"npub hex {npub_hex} {settings.NOSTR_RELAYS} {FILTER}")
+    print(f"npub hex:{npub_hex} relays:{settings.NOSTR_RELAYS} kind:{settings.KIND_DNS} filter: {FILTER}")
 
     tuples: list[tuple[str, str, int]] = []
 
     async with ClientPool(settings.NOSTR_RELAYS) as c:
-        events = await c.query(FILTER)
+    # async with Client(settings.NOSTR_RELAYS[0]) as c:
+
+        try:
+            events = await c.query(FILTER)
+        except asyncio.CancelledError:
+            print("[NPUB] query was cancelled")
+            events = []
+        except Exception as e:
+            print("[NPUB] query error:", e)
+            events = []
+
+        # events = await c.query(FILTER)
 
     print(f"records retrieved: {len(events)} ")
     for each in events:
+        print(each.tags)
         dict_records = parse_into_dns_records(each.tags)
         for rec in dict_records:
             rtype = rec.get("type", "").upper()
@@ -496,3 +508,9 @@ def fetch_any_sync(npub: str, timeout: float) -> list[tuple[str, str, int]]:
         print(f"[NPUB] ANY fetch failed/timed out: {e}")
         return []
 
+async def fetch_any_sync_2(npub: str, timeout: float) -> list[tuple[str, str, int]]:
+    """
+    Synchronously fetch ALL (A/TXT/AAAA...) tuples for an npub.
+    Creates its own event loop via asyncio.run(), with a hard timeout.
+    """
+    return await lookup_npub_records_tuples(npub, 255)
