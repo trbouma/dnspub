@@ -9,7 +9,7 @@ from typing import Tuple
 import signal
 import sys
 
-from nostrdns import npub_to_hex_pubkey, lookup_npub_records, lookup_npub_records_tuples, Settings, lookup_npub_a_first, _npub_a_first_with_timeout, _npub_fetch_all_with_timeout, _fetch_any_with_timeout, _bg_refresh, fetch_any_sync, fetch_any_sync_2
+from nostrdns import npub_to_hex_pubkey, lookup_npub_records, lookup_npub_records_tuples, Settings, lookup_npub_a_first, _npub_a_first_with_timeout, _npub_fetch_all_with_timeout, _fetch_any_with_timeout, _bg_refresh, fetch_any_sync, fetch_any_sync_2, lookup_npub_profile
 import urllib.request
 
 from settings import Settings, get_settings
@@ -480,6 +480,23 @@ def build_response(req: bytes) -> bytes:
         
         if is_npub:
             npub_to_use = nameparts[offset]
+
+            # Test for service requests
+            if npub_subdomain and npub_subdomain[0] == "_":
+
+                print(f"There is a service request {npub_subdomain}")
+                npub_hex = npub_to_hex_pubkey(npub_to_use)
+                service_answer = asyncio.run(lookup_npub_profile(npub_hex,service_request=npub_subdomain))
+                answers = b""
+                auth = zone_ns_authority(zone)
+                ttl = 3600
+                nip05 = "test@example.com"
+                answers += rr_txt(fqdn, service_answer, int(ttl))
+                # return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
+
+                return positive_answer(tid, req_flags, question, answers=answers, authorities=auth, aa=True, ra=RA, add_opt=add_opt)
+
+
             # CAA at leaf → clean NODATA
             if qtype == 257:
                 return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)

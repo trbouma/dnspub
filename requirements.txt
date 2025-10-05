@@ -10,6 +10,7 @@ bech32==1.2.0
 cachetools==6.2.0
 cffi==2.0.0
 cryptography==46.0.1
+dnspython==2.8.0
 frozenlist==1.7.0
 idna==3.10
 monstr==0.1.9

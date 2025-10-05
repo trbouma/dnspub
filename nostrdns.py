@@ -514,3 +514,37 @@ async def fetch_any_sync_2(npub: str, timeout: float) -> list[tuple[str, str, in
     Creates its own event loop via asyncio.run(), with a hard timeout.
     """
     return await lookup_npub_records_tuples(npub, 255)
+
+
+async def lookup_npub_profile(npub_hex: str, service_request: str):
+
+    FILTER = [{
+        'limit': 1,
+        'authors': [npub_hex],
+        'kinds': [0]
+    }]
+    print(f"npub hex:{npub_hex} relays:{settings.NOSTR_RELAYS} kind:{settings.KIND_DNS} filter: {FILTER}")
+
+    events = []
+
+    async with ClientPool(settings.NOSTR_RELAYS) as c:
+   
+
+        try:
+            events = await c.query(FILTER)
+        except asyncio.CancelledError:
+            print("[NPUB] query was cancelled")
+            events = []
+        except Exception as e:
+            print("[NPUB] query error:", e)
+            events = []
+
+        if events:
+            json_obj = json.loads(events[0].content)
+            print(json_obj)
+            metadata = service_request.lstrip("_")
+            nip05 = json_obj.get(metadata)
+
+    txt_record = f"{nip05}"
+
+    return txt_record
