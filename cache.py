@@ -1,7 +1,7 @@
 # cache.py
 import sqlite3, time, threading
 from contextlib import contextmanager, closing
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Tuple, Optional
 import asyncio
 
 
@@ -14,6 +14,7 @@ DB_PATH = "data/npubcache.sqlite3"
 
 _SCHEMA = """
 PRAGMA journal_mode=WAL;
+
 CREATE TABLE IF NOT EXISTS rr_cache (
     fqdn        TEXT NOT NULL,
     rtype       TEXT NOT NULL,
@@ -24,6 +25,15 @@ CREATE TABLE IF NOT EXISTS rr_cache (
     PRIMARY KEY (fqdn, rtype, value)
 );
 CREATE INDEX IF NOT EXISTS idx_rr_cache_lookup ON rr_cache (fqdn, rtype, expires_at);
+
+-- Add profile cache table
+CREATE TABLE IF NOT EXISTS profile_cache (
+    npub_hex        TEXT NOT NULL,
+    service_request TEXT NOT NULL,
+    txt_value       TEXT,
+    expires_at      INTEGER NOT NULL,
+    PRIMARY KEY (npub_hex, service_request)
+);
 """
 
 @contextmanager
@@ -91,3 +101,35 @@ def purge_expired(limit: int = 500):
     with _conn() as con:
         con.execute("DELETE FROM rr_cache WHERE expires_at < ?", (_now()-3600,))
 
+def get_profile_cache(npub_hex: str, service_request: str) -> Optional[str]:
+    """Return cached txt_value if still fresh, else None."""
+    now = _now()
+    with sqlite3.connect(DB_PATH, timeout=2.0) as con:
+        cur = con.execute(
+            "SELECT txt_value, expires_at FROM profile_cache WHERE npub_hex=? AND service_request=?",
+            (npub_hex, service_request)
+        )
+        row = cur.fetchone()
+        if not row:
+            return None,0
+        txt_value, expires_at = row
+        if expires_at >= now:
+            tt_left = expires_at - now
+            print(f"time left {tt_left}")
+            return txt_value, tt_left
+        # expired
+        con.execute(
+            "DELETE FROM profile_cache WHERE npub_hex=? AND service_request=?",
+            (npub_hex, service_request)
+        )
+        return None, 0
+
+def put_profile_cache(npub_hex: str, service_request: str, txt_value: str, ttl: int = 3600):
+    """Insert or replace a cached profile value with expiration."""
+    now = _now()
+    expires_at = now + ttl
+    with sqlite3.connect(DB_PATH, timeout=2.0, isolation_level=None) as con:
+        con.execute(
+            "INSERT OR REPLACE INTO profile_cache (npub_hex, service_request, txt_value, expires_at) VALUES (?, ?, ?, ?)",
+            (npub_hex, service_request, txt_value, expires_at)
+        )

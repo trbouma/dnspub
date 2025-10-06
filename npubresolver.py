@@ -486,12 +486,12 @@ def build_response(req: bytes) -> bytes:
 
                 print(f"There is a service request {npub_subdomain}")
                 npub_hex = npub_to_hex_pubkey(npub_to_use)
-                service_answer = asyncio.run(lookup_npub_profile(npub_hex,service_request=npub_subdomain))
+                service_answer, time_left = asyncio.run(lookup_npub_profile(npub_hex,service_request=npub_subdomain))
                 answers = b""
                 auth = zone_ns_authority(zone)
                 ttl = 3600
                 nip05 = "test@example.com"
-                answers += rr_txt(fqdn, service_answer, int(ttl))
+                answers += rr_txt(fqdn, service_answer, int(time_left))
                 # return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
 
                 return positive_answer(tid, req_flags, question, answers=answers, authorities=auth, aa=True, ra=RA, add_opt=add_opt)

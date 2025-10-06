@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings
 from monstr.client.client import Client, ClientPool
 from monstr.event.event import Event
 
-from cache import put_records
+from cache import put_records, get_profile_cache, put_profile_cache
 from settings import Settings, get_settings
 
 
@@ -517,7 +517,17 @@ async def fetch_any_sync_2(npub: str, timeout: float) -> list[tuple[str, str, in
 
 
 async def lookup_npub_profile(npub_hex: str, service_request: str):
+    """
+    Look up a Kind 0 Nostr profile field (like _nip05 or _name).
+    Uses local cache; if not found or expired, fetches from relay and caches the result.
+    """
+    # --- check cache first ---
+    cached, time_left = get_profile_cache(npub_hex, service_request)
+    if cached is not None:
+        print(f"[CACHE HIT] {npub_hex} / {service_request} -> {cached}")
+        return cached, time_left
 
+    # --- cache miss: fetch from relays ---
     FILTER = [{
         'limit': 1,
         'authors': [npub_hex],
@@ -526,10 +536,7 @@ async def lookup_npub_profile(npub_hex: str, service_request: str):
     print(f"npub hex:{npub_hex} relays:{settings.NOSTR_RELAYS} kind:{settings.KIND_DNS} filter: {FILTER}")
 
     events = []
-
     async with ClientPool(settings.NOSTR_RELAYS) as c:
-   
-
         try:
             events = await c.query(FILTER)
         except asyncio.CancelledError:
@@ -539,12 +546,21 @@ async def lookup_npub_profile(npub_hex: str, service_request: str):
             print("[NPUB] query error:", e)
             events = []
 
+        service_answer = None
         if events:
-            json_obj = json.loads(events[0].content)
-            print(json_obj)
-            metadata = service_request.lstrip("_")
-            nip05 = json_obj.get(metadata)
+            try:
+                json_obj = json.loads(events[0].content)
+                print(json_obj)
+                metadata = service_request.lstrip("_")
+                service_answer = json_obj.get(metadata)
+            except Exception as e:
+                print(f"[NPUB] failed to parse Kind 0 event: {e}")
+                service_answer = None
 
-    txt_record = f"{nip05}"
+    txt_record = f"{service_answer or ''}"
 
-    return txt_record
+    # --- store result in cache (TTL=3600 seconds) ---
+    put_profile_cache(npub_hex, service_request, txt_record, ttl=3600)
+    print(f"[CACHE WRITE] {npub_hex} / {service_request} -> {txt_record}")
+
+    return txt_record, 3600
