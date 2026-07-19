@@ -13,6 +13,10 @@ services:
       PUBLIC_IP: "${PUBLIC_IP:-auto}"
       PUBLIC_IP_DISCOVERY_URL: "${PUBLIC_IP_DISCOVERY_URL:-https://api.ipify.org}"
       PUBLIC_IP_DISCOVERY_TIMEOUT: "${PUBLIC_IP_DISCOVERY_TIMEOUT:-3.0}"
+      ZONE: "${ZONE:-dnspub.xyz.}"
+      NS_HOST: "${NS_HOST:-ns1.dnspub.xyz.}"
+      SOA_RNAME: "${SOA_RNAME:-hostmaster.dnspub.xyz.}"
+      SOA_SERIAL: "${SOA_SERIAL:-2026071901}"
       NOSTR_FETCH_TIMEOUT: "${NOSTR_FETCH_TIMEOUT:-1.0}"
       NOSTR_RELAYS: '${NOSTR_RELAYS:-["wss://relay.damus.io","wss://nos.lol","wss://relay.primal.net","wss://relay.snort.social"]}'
       KIND_DNS: "${KIND_DNS:-11111}"

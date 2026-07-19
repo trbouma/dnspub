@@ -21,8 +21,17 @@ class Settings(BaseSettings):
     ]
     KIND_DNS: int = 11111
 
-    # Make these configurable via .env
-    ZONE: str = "npub.openproof.org."
+    # Authoritative zone settings. Names are normalized with a trailing dot.
+    ZONE: str = "dnspub.xyz."
+    NS_HOST: str = "ns1.dnspub.xyz."
+    SOA_RNAME: str = "hostmaster.dnspub.xyz."
+    SOA_SERIAL: int = 2026071901
+    SOA_REFRESH: int = 3600
+    SOA_RETRY: int = 600
+    SOA_EXPIRE: int = 604800
+    SOA_MINIMUM: int = 3600
+    SOA_TTL: int = 3600
+    CAA_ISSUER: str = "letsencrypt.org"
     DB_PATH: str = "data/npubcache.sqlite3"
 
     # Pydantic v2 settings config

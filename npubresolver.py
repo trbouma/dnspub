@@ -7,15 +7,14 @@ import struct
 import logging
 import bech32
 import asyncio
-from typing import Tuple
+from typing import Optional
 import signal
-import sys
 import urllib.request
 
 from nostrdns import fetch_any_sync_2, lookup_npub_profile, npub_to_hex_pubkey
 
-from settings import Settings, get_settings
-from cache import init_cache, get_records, put_records, purge_expired
+from settings import get_settings
+from cache import init_cache, get_records, put_records
 settings = get_settings()
 init_cache()
 
@@ -51,9 +50,6 @@ logging.basicConfig(
 )
 log = logging.getLogger("dns")
 
-# ---- monstr (for npub validation) ----
-
-
 def is_valid_npub(label: str) -> bool:
     """
     Validate a string as a Nostr npub (bech32).
@@ -72,7 +68,9 @@ def is_valid_npub(label: str) -> bool:
     except Exception:
         return False
 
-def inspect_fqdn_for_npub(fqdn: str) -> Tuple[bool, str, int, str]: 
+def inspect_fqdn_for_npub(
+    fqdn: str,
+) -> tuple[bool, list[str], Optional[int], Optional[str]]:
     """
     Inspect an FQDN for a valid npub label.
 
@@ -98,66 +96,35 @@ def inspect_fqdn_for_npub(fqdn: str) -> Tuple[bool, str, int, str]:
     return False, labels, None, None
 
 
-# Zone SOA config
-ZONE   = "npub.openproof.org."
-MNAME  = "ns1.npub.openproof.org."           # primary nameserver
-RNAME  = "hostmaster.npub.openproof.org."    # admin email with '.' instead of '@'
-SERIAL = 2025092701                     # bump when you change zone data
-REFRESH = 3600
-RETRY   = 600
-EXPIRE  = 604800
-MINIMUM = 3600
-SOA_TTL = 3600
+def normalize_dns_name(name: str) -> str:
+    normalized = name.strip().lower().rstrip(".")
+    if not normalized:
+        raise ValueError("DNS name cannot be empty")
+    return normalized + "."
 
 
-NS    = ["ns1.npub.openproof.org."]          # you can add ns2 later
-GLUE = {"ns1.npub.openproof.org.": get_public_ip()}
+ZONE = normalize_dns_name(settings.ZONE)
+NS_HOST = normalize_dns_name(settings.NS_HOST)
+SOA_RNAME = normalize_dns_name(settings.SOA_RNAME)
 
 
-# -------------------------------
-# Local records
-# -------------------------------
-LOCAL_DATA = {
-    "example.com.": [("A", "93.184.216.34", 300)],
-    "local.test.":  [("TXT", "hello from local", 60)],
-}
-
-# -------------------------------
-# Upstream forwarders
-# -------------------------------
-FORWARDERS = [
-    ("1.1.1.1", 53),
-    ("8.8.8.8", 53),
-]
-FORWARD_TIMEOUT = 2.0
-
-# ---- multi-zone config ----
+# ---- authoritative zone config ----
 ZONES = {
-    "openproof.org.": {
-        "ns": ["ns1.openproof.org."],
-        "glue_a": {"ns1.openproof.org.": get_public_ip()},
+    ZONE: {
+        "ns": [NS_HOST],
+        "glue_a": {NS_HOST: get_public_ip()},
         "soa": {
-            "mname": "ns1.openproof.org.",
-            "rname": "hostmaster.openproof.org.",
-            "serial": 2025092801,
-            "refresh": 3600, "retry": 600, "expire": 604800, "minimum": 3600, "ttl": 3600
+            "mname": NS_HOST,
+            "rname": SOA_RNAME,
+            "serial": settings.SOA_SERIAL,
+            "refresh": settings.SOA_REFRESH,
+            "retry": settings.SOA_RETRY,
+            "expire": settings.SOA_EXPIRE,
+            "minimum": settings.SOA_MINIMUM,
+            "ttl": settings.SOA_TTL,
         },
-    },
-    "npub.openproof.org.": {
-    "soa": {  # your existing SOA fields
-        "mname": "ns1.openproof.org.",
-        "rname": "hostmaster.openproof.org.",
-        "serial": 2025092901, "refresh": 3600, "retry": 600, "expire": 604800, "minimum": 3600, "ttl": 3600
-    },
-    "ns": ["ns1.openproof.org."],
-    "glue_a": {"ns1.openproof.org.": get_public_ip()},
-    # NEW: explicit CAA that authorizes Let's Encrypt and no wildcards by default
-    "caa": [
-        (0, "issue", "letsencrypt.org", 3600),
-        # (0, "issuewild", ";", 3600),  # uncomment if you want to explicitly *deny* wildcards
-        # (0, "iodef", "mailto:hostmaster@openproof.org", 3600),
-    ],
-},
+        "caa": [(0, "issue", settings.CAA_ISSUER, 3600)],
+    }
 }
 
 def should_use_cache() -> bool:
@@ -166,49 +133,19 @@ def should_use_cache() -> bool:
 
 def find_zone(qname: str) -> str | None:
     """Return the longest matching zone apex for qname."""
-    q = qname.rstrip(".") + "."
+    q = normalize_dns_name(qname)
     best = None
-    for zone in ZONES.keys():
-        if q.endswith(zone) and (best is None or len(zone) > len(best)):
+    for zone in ZONES:
+        if (q == zone or q.endswith("." + zone)) and (
+            best is None or len(zone) > len(best)
+        ):
             best = zone
     return best
 
-def find_zone_2(qname: str) -> str | None:
-    """Return the longest matching zone apex for qname."""
-    q = qname.rstrip(".") + "."
-    best = None
-    for zone in ZONES.keys():
-        if q.endswith(zone) and (best is None or len(zone) > len(best)):
-            best = zone
-    if best:
-        return best, ZONES.get(best)
-    else:    
-        valid_npub, labels,pos, subdomain = inspect_fqdn_for_npub(fqdn=qname)
-        if valid_npub:
-            npub_zone = zone = ".".join(labels[pos+1:]) + "."
-            print(f"The npub zone is: {npub_zone}")
-            print(f"{valid_npub} {labels} {pos} {subdomain}")
-
-            fake_zone_info = {
-                            "soa": {  # your existing SOA fields
-                            "mname": f"ns1.{npub_zone}",
-                            "rname": f"hostmaster.{npub_zone}",
-                            "serial": 2025092901, "refresh": 3600, "retry": 600, "expire": 604800, "minimum": 3600, "ttl": 3600
-                                    },
-                            "ns": [f"ns1.{npub_zone}"],
-                            "glue_a": {f"ns1.{npub_zone}": f"{get_public_ip()}"},
-                            # NEW: explicit CAA that authorizes Let's Encrypt and no wildcards by default
-                            "caa": [
-                                (0, "issue", "letsencrypt.org", 3600),
-                                # (0, "issuewild", ";", 3600),  # uncomment if you want to explicitly *deny* wildcards
-                                # (0, "iodef", f"mailto:hostmaster@{npub_zone}", 3600),
-                            ],
-                        }
-            ZONES[npub_zone] = fake_zone_info
-            print(f"fake_zone: {fake_zone_info}")
-            return npub_zone, fake_zone_info
-        
-        return None, None
+def find_zone_info(qname: str):
+    """Return the configured zone and its data for qname."""
+    zone = find_zone(qname)
+    return zone, ZONES.get(zone) if zone else None
 
 
 # -------------------------------
@@ -290,39 +227,6 @@ def rr_txt(name, text, ttl):
 def rr_soa(qname: str, mname: str, rname: str,
            serial: int, refresh: int, retry: int,
            expire: int, minimum: int, ttl: int = 3600) -> bytes:
-    def _enc(name: str) -> bytes:
-        parts = name.rstrip(".").split(".")
-        return b"".join(bytes([len(p)]) + p.encode() for p in parts) + b"\x00"
-
-    rdata = (
-        _enc(mname) +
-        _enc(rname) +
-        struct.pack(">IIIII", serial, refresh, retry, expire, minimum)
-    )
-    return (
-        _enc(qname) +
-        struct.pack(">HHI", 6, 1, ttl) +            # TYPE=SOA, CLASS=IN, TTL
-        struct.pack(">H", len(rdata)) + rdata
-    )
-
-# -------------------------------
-# Forward to upstream
-# -------------------------------
-def forward_query(req: bytes) -> bytes | None:
-    for host, port in FORWARDERS:
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.settimeout(FORWARD_TIMEOUT)
-                s.sendto(req, (host, port))
-                resp, _ = s.recvfrom(4096)
-                return resp
-        except Exception as e:
-            log.debug(f"forwarder {host}:{port} failed: {e}")
-            continue
-    return None
-def rr_soa(qname: str, mname: str, rname: str,
-           serial: int, refresh: int, retry: int,
-           expire: int, minimum: int, ttl: int = 3600) -> bytes:
     """
     Build a DNS SOA record.
     
@@ -369,20 +273,6 @@ def rr_caa(name: str, flag: int, tag: str, value: str, ttl: int) -> bytes:
 
     # TYPE=257, CLASS=IN(1), TTL, RDLEN, RDATA
     return n + struct.pack(">HHI", 257, 1, int(ttl)) + struct.pack(">H", len(rdata)) + rdata
-
-OVERRIDES = {
-    "npub1h9taws9gujwja2weyxzhawfahwqljcm3cs7wjv5vv70dvtx637wsl8rhx0.npub.openproof.org.": {
-        "A": ("172.105.26.76", 300),   # <— your Nginx public IPv4
-        "TXT": ("this is a test override text", 300),
-        # only add AAAA if your Nginx listens on 80 over IPv6:
-        # "AAAA": ("2001:db8::1", 300), 
-        },
-    "npub1cwddk7gqlg0l934ensek4ctl7mqg3drd33apv4wg9gr7cnl6gsnsujhrk2.npub.openproof.org.": {
-        "A": ("172.105.26.76", 300),   # <— your Nginx public IPv4
-        # only add AAAA if your Nginx listens on 80 over IPv6:
-        # "AAAA": ("2001:db8::1", 300), 
-        },    
-}
 
 def normalize_name(name: str) -> str:
     n = (name or "").rstrip(".").lower()
@@ -433,24 +323,6 @@ def build_response(req: bytes) -> bytes:
     add_opt = True
     fqdn = normalize_name(qname)
 
-    # ---- OVERRIDES (unchanged) ----
-    recs = OVERRIDES.get(fqdn)
-    if recs:
-        print("providing an override record!")
-        answers = b""
-        if qtype in (1, 255) and "A" in recs:
-            answers += rr_a(fqdn, recs["A"][0], int(recs["A"][1]))
-        if qtype in (28, 255) and "AAAA" in recs:
-            answers += rr_aaaa(fqdn, recs["AAAA"][0], int(recs["AAAA"][1]))
-        if qtype in (16, 255) and "TXT" in recs:
-            answers += rr_txt(fqdn, str(recs["TXT"][0]), int(recs["TXT"][1]))
-        if qtype == 28 and "AAAA" not in recs:
-            zone = find_zone(fqdn)
-            if zone:
-                return nodata(zone, tid, req_flags, question, add_opt=add_opt, ra=RA)
-        if answers:
-            return positive_answer(tid, req_flags, question, answers=answers, aa=True, ra=RA, add_opt=add_opt)
-
     # ---- Only IN ----
     if qclass != 1:
         flags = build_flags(req_flags, rcode=4, aa=True, ra=RA)  # NOTIMP
@@ -458,8 +330,7 @@ def build_response(req: bytes) -> bytes:
         return header + question + (rr_opt() if add_opt else b"")
 
     # ---- ZONE HANDLING ----
-    # zone = find_zone(fqdn)
-    zone, z = find_zone_2(fqdn)
+    zone, z = find_zone_info(fqdn)
     print(f"for {fqdn} zone is {zone} and the z is: {z}")
     if zone:
         z = ZONES[zone]
@@ -640,7 +511,6 @@ def start_dns_tcp(host="0.0.0.0", port=53):
 # UDP server
 # -------------------------------
 def start_dns_server(host="0.0.0.0", port=53):
-    settings = Settings()
     print(f" Settings: {settings}")
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     # allow quick restart

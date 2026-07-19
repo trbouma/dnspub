@@ -4,13 +4,7 @@ import dns.rdatatype
 
 import npubresolver
 from nostrdns import npub_to_hex_pubkey, parse_into_dns_records
-from npubresolver import build_response, get_public_ip
-
-
-OVERRIDE_NAME = (
-    "npub1h9taws9gujwja2weyxzhawfahwqljcm3cs7wjv5vv70dvtx637wsl8rhx0."
-    "npub.openproof.org"
-)
+from npubresolver import NS_HOST, ZONE, build_response, get_public_ip
 
 
 def query(name: str, record_type: str):
@@ -19,25 +13,33 @@ def query(name: str, record_type: str):
 
 
 def test_zone_apex_returns_soa():
-    response = query("npub.openproof.org", "SOA")
+    response = query(ZONE, "SOA")
 
     assert response.rcode() == dns.rcode.NOERROR
     assert response.answer[0].rdtype == dns.rdatatype.SOA
 
 
-def test_override_returns_configured_address():
-    response = query(OVERRIDE_NAME, "A")
+def test_zone_apex_returns_nameserver_and_glue():
+    response = query(ZONE, "NS")
 
     assert response.rcode() == dns.rcode.NOERROR
-    assert response.answer[0][0].address == "172.105.26.76"
+    assert str(response.answer[0][0].target) == NS_HOST
+    assert response.additional[0][0].address == get_public_ip()
 
 
 def test_ordinary_in_zone_name_returns_nodata_without_crashing():
-    response = query("ordinary.npub.openproof.org", "A")
+    response = query(f"ordinary.{ZONE}", "A")
 
     assert response.rcode() == dns.rcode.NOERROR
     assert not response.answer
     assert response.authority[0].rdtype == dns.rdatatype.SOA
+
+
+def test_outside_zone_is_refused():
+    response = query("example.com", "A")
+
+    assert response.rcode() == dns.rcode.REFUSED
+    assert not response.answer
 
 
 def test_record_tags_are_parsed_and_invalid_rows_are_ignored():
