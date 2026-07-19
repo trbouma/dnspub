@@ -1,13 +1,8 @@
 # Dockerfile
-FROM python:3.12-slim
+FROM python:3.12-alpine3.23
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
-
-# System deps for secp256k1 / cryptography
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential pkg-config libsecp256k1-dev libssl-dev libffi-dev \
-  && rm -rf /var/lib/apt/lists/*
 
 # Set workdir first
 WORKDIR /app
