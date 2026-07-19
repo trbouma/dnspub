@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
+import argparse
 import socket, threading
 import struct
 import logging
-from monstr.encrypt import Keys
 import bech32
 import asyncio
 from typing import Tuple
 import signal
 import sys
 
-from nostrdns import npub_to_hex_pubkey, lookup_npub_records, lookup_npub_records_tuples, Settings, lookup_npub_a_first, _npub_a_first_with_timeout, _npub_fetch_all_with_timeout, _fetch_any_with_timeout, _bg_refresh, fetch_any_sync, fetch_any_sync_2, lookup_npub_profile
-import urllib.request
+from nostrdns import fetch_any_sync_2, lookup_npub_profile, npub_to_hex_pubkey
 
 from settings import Settings, get_settings
 from cache import init_cache, get_records, put_records, purge_expired
@@ -19,11 +18,7 @@ init_cache()
 
 
 def get_public_ip() -> str:
-    try:
-        with urllib.request.urlopen("https://api.ipify.org") as resp:
-            return resp.read().decode().strip()
-    except Exception:
-        return "127.0.0.1"  # fallback
+    return settings.PUBLIC_IP
 
 
 # ---- logging ----
@@ -475,7 +470,8 @@ def build_response(req: bytes) -> bytes:
 
         # ---------- NPUB LEAF HANDLING (moved up BEFORE fallback) ----------
         is_npub,nameparts, offset, npub_subdomain = inspect_fqdn_for_npub(fqdn=fqdn)
-        print(f"inspect for npub {is_npub} {nameparts} {offset} {nameparts[offset]} subdomain: {npub_subdomain}")
+        npub_label = nameparts[offset] if offset is not None else None
+        print(f"inspect for npub {is_npub} {nameparts} {offset} {npub_label} subdomain: {npub_subdomain}")
         # leftmost = fqdn.split(".", 1)[0]
         
         if is_npub:
@@ -679,6 +675,17 @@ def start_dns_server(host="0.0.0.0", port=53):
             pass
         print("[DNS] socket closed")
 
+def main():
+    parser = argparse.ArgumentParser(description="Nostr npub authoritative DNS server")
+    parser.add_argument("--host", default=settings.DNS_HOST)
+    parser.add_argument("--port", type=int, default=settings.DNS_PORT)
+    args = parser.parse_args()
+
+    threading.Thread(
+        target=start_dns_tcp, args=(args.host, args.port), daemon=True
+    ).start()
+    start_dns_server(args.host, args.port)
+
+
 if __name__ == "__main__":
-    threading.Thread(target=start_dns_tcp, daemon=True).start()
-    start_dns_server()  # your UDP loop
+    main()

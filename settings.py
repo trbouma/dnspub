@@ -4,6 +4,9 @@ from typing import List
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
+    DNS_HOST: str = "0.0.0.0"
+    DNS_PORT: int = 53
+    PUBLIC_IP: str = "127.0.0.1"
     DEBUG_ALWAYS_RELAY: bool = False
     NOSTR_FETCH_TIMEOUT: float = 1.0
     CACHE_ACTIVATED: bool = True

@@ -1,0 +1,25 @@
+[tool.poetry]
+name = "dnspub"
+version = "0.1.0"
+description = "Authoritative DNS server for Nostr npub records"
+authors = []
+license = "MIT"
+readme = "README.md"
+packages = [{ include = "dnspub" }]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+aiohttp = "3.12.15"
+bech32 = "1.2.0"
+dnspython = "2.8.0"
+pydantic-settings = "2.11.0"
+
+[tool.poetry.scripts]
+dnspub = "dnspub.cli:main"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3"
+
+[build-system]
+requires = ["poetry-core>=1.9.0"]
+build-backend = "poetry.core.masonry.api"

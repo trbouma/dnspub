@@ -8,3 +8,45 @@ The idea is to extend DNS (and DNSSEC) to provide a freedom leaf - a namespace w
 
 For example:
  - https://npub1w3megrmxlu7yws0xfzasrvd4k6nf56dp4kvlp7uqr877a3xtzgnqdzunas.npub.openproof.org
+
+## Local development
+
+The server uses Python 3.12 and Poetry. It listens on both UDP and TCP.
+
+```bash
+poetry env use python3.12
+poetry install
+poetry run pytest
+poetry run dnspub --host 127.0.0.1 --port 5353
+```
+
+Query the local server from another terminal:
+
+```bash
+dig @127.0.0.1 -p 5353 npub.openproof.org SOA
+dig @127.0.0.1 -p 5353 <npub>.npub.openproof.org A
+dig +tcp @127.0.0.1 -p 5353 <npub>.npub.openproof.org A
+```
+
+Port 53 normally requires elevated privileges. Use port 5353 for development.
+
+## Configuration
+
+Settings can be supplied in `.env`. Useful values include:
+
+```dotenv
+DNS_HOST=0.0.0.0
+DNS_PORT=53
+PUBLIC_IP=127.0.0.1
+NOSTR_FETCH_TIMEOUT=1.0
+NOSTR_RELAYS=["wss://relay.damus.io","wss://nos.lol"]
+CACHE_ACTIVATED=true
+DB_PATH=data/npubcache.sqlite3
+```
+
+For a Poetry-based server deployment:
+
+```bash
+poetry install --only main
+poetry run dnspub
+```

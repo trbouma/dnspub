@@ -4,13 +4,15 @@ from contextlib import contextmanager, closing
 from typing import Iterable, List, Tuple, Optional
 import asyncio
 
+from settings import get_settings
+
 
 # Cache policy
 MAX_CACHE_TTL = 10          # seconds to cap stored TTLs (5 min)
 STALE_GRACE   = 30           # serve up to +30s stale while background refresh happens
 
 # DB path (bind-mount this dir in Docker if you want persistence)
-DB_PATH = "data/npubcache.sqlite3"
+DB_PATH = get_settings().DB_PATH
 
 _SCHEMA = """
 PRAGMA journal_mode=WAL;
