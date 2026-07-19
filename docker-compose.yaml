@@ -1,0 +1,24 @@
+services:
+  dnspub:
+    build:
+      context: .
+    image: dnspub:local
+    restart: unless-stopped
+    ports:
+      - "${DNS_BIND_ADDRESS:-127.0.0.1}:${DNS_HOST_PORT:-5353}:53/udp"
+      - "${DNS_BIND_ADDRESS:-127.0.0.1}:${DNS_HOST_PORT:-5353}:53/tcp"
+    environment:
+      DNS_HOST: "0.0.0.0"
+      DNS_PORT: "53"
+      PUBLIC_IP: "${PUBLIC_IP:-127.0.0.1}"
+      NOSTR_FETCH_TIMEOUT: "${NOSTR_FETCH_TIMEOUT:-1.0}"
+      NOSTR_RELAYS: '${NOSTR_RELAYS:-["wss://relay.damus.io","wss://nos.lol","wss://relay.primal.net","wss://relay.snort.social"]}'
+      KIND_DNS: "${KIND_DNS:-11111}"
+      CACHE_ACTIVATED: "${CACHE_ACTIVATED:-true}"
+      CACHE_WRITEBACK: "${CACHE_WRITEBACK:-true}"
+      DB_PATH: "/app/data/npubcache.sqlite3"
+    volumes:
+      - dnspub-data:/app/data
+
+volumes:
+  dnspub-data:

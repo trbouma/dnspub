@@ -30,6 +30,31 @@ dig +tcp @127.0.0.1 -p 5353 <npub>.npub.openproof.org A
 
 Port 53 normally requires elevated privileges. Use port 5353 for development.
 
+## Docker Compose
+
+Build and start the resolver in the background:
+
+```bash
+docker compose up --build -d
+docker compose logs -f dnspub
+```
+
+By default, Compose publishes DNS on `127.0.0.1:5353` for both UDP and TCP.
+
+```bash
+dig @127.0.0.1 -p 5353 npub.openproof.org SOA
+dig +tcp @127.0.0.1 -p 5353 npub.openproof.org SOA
+```
+
+Stop the service while preserving its cache volume:
+
+```bash
+docker compose down
+```
+
+Set `DNS_BIND_ADDRESS`, `DNS_HOST_PORT`, and other application settings in
+`.env` when different values are required.
+
 ## Configuration
 
 Settings can be supplied in `.env`. Useful values include:
