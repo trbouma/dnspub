@@ -10,7 +10,9 @@ services:
     environment:
       DNS_HOST: "0.0.0.0"
       DNS_PORT: "53"
-      PUBLIC_IP: "${PUBLIC_IP:-127.0.0.1}"
+      PUBLIC_IP: "${PUBLIC_IP:-auto}"
+      PUBLIC_IP_DISCOVERY_URL: "${PUBLIC_IP_DISCOVERY_URL:-https://api.ipify.org}"
+      PUBLIC_IP_DISCOVERY_TIMEOUT: "${PUBLIC_IP_DISCOVERY_TIMEOUT:-3.0}"
       NOSTR_FETCH_TIMEOUT: "${NOSTR_FETCH_TIMEOUT:-1.0}"
       NOSTR_RELAYS: '${NOSTR_RELAYS:-["wss://relay.damus.io","wss://nos.lol","wss://relay.primal.net","wss://relay.snort.social"]}'
       KIND_DNS: "${KIND_DNS:-11111}"

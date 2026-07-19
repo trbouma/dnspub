@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import argparse
+from functools import lru_cache
+import ipaddress
 import socket, threading
 import struct
 import logging
@@ -8,6 +10,7 @@ import asyncio
 from typing import Tuple
 import signal
 import sys
+import urllib.request
 
 from nostrdns import fetch_any_sync_2, lookup_npub_profile, npub_to_hex_pubkey
 
@@ -17,8 +20,28 @@ settings = get_settings()
 init_cache()
 
 
+@lru_cache
 def get_public_ip() -> str:
-    return settings.PUBLIC_IP
+    configured_ip = settings.PUBLIC_IP.strip()
+    if configured_ip.lower() != "auto":
+        address = ipaddress.ip_address(configured_ip)
+        if address.version != 4:
+            raise ValueError("PUBLIC_IP must be an IPv4 address")
+        return str(address)
+
+    try:
+        with urllib.request.urlopen(
+            settings.PUBLIC_IP_DISCOVERY_URL,
+            timeout=settings.PUBLIC_IP_DISCOVERY_TIMEOUT,
+        ) as response:
+            discovered_ip = response.read().decode("ascii").strip()
+        address = ipaddress.ip_address(discovered_ip)
+        if address.version != 4:
+            raise ValueError("discovery service returned a non-IPv4 address")
+        log.info("Discovered public IPv4 address: %s", address)
+        return str(address)
+    except Exception as exc:
+        raise RuntimeError(f"Unable to discover public IPv4 address: {exc}") from exc
 
 
 # ---- logging ----
@@ -112,7 +135,7 @@ FORWARD_TIMEOUT = 2.0
 ZONES = {
     "openproof.org.": {
         "ns": ["ns1.openproof.org."],
-        "glue_a": {"ns1.openproof.org.": "15.235.3.226"},
+        "glue_a": {"ns1.openproof.org.": get_public_ip()},
         "soa": {
             "mname": "ns1.openproof.org.",
             "rname": "hostmaster.openproof.org.",
@@ -127,7 +150,7 @@ ZONES = {
         "serial": 2025092901, "refresh": 3600, "retry": 600, "expire": 604800, "minimum": 3600, "ttl": 3600
     },
     "ns": ["ns1.openproof.org."],
-    "glue_a": {"ns1.openproof.org.": "15.235.3.226"},
+    "glue_a": {"ns1.openproof.org.": get_public_ip()},
     # NEW: explicit CAA that authorizes Let's Encrypt and no wildcards by default
     "caa": [
         (0, "issue", "letsencrypt.org", 3600),

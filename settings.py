@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     DNS_HOST: str = "0.0.0.0"
     DNS_PORT: int = 53
     PUBLIC_IP: str = "127.0.0.1"
+    PUBLIC_IP_DISCOVERY_URL: str = "https://api.ipify.org"
+    PUBLIC_IP_DISCOVERY_TIMEOUT: float = 3.0
     DEBUG_ALWAYS_RELAY: bool = False
     NOSTR_FETCH_TIMEOUT: float = 1.0
     CACHE_ACTIVATED: bool = True

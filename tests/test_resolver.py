@@ -2,8 +2,9 @@ import dns.message
 import dns.rcode
 import dns.rdatatype
 
+import npubresolver
 from nostrdns import npub_to_hex_pubkey, parse_into_dns_records
-from npubresolver import build_response
+from npubresolver import build_response, get_public_ip
 
 
 OVERRIDE_NAME = (
@@ -56,3 +57,28 @@ def test_record_tags_are_parsed_and_invalid_rows_are_ignored():
 
 def test_invalid_npub_is_rejected():
     assert npub_to_hex_pubkey("npub-not-valid") is None
+
+
+def test_public_ip_can_be_discovered(monkeypatch):
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return b"203.0.113.10\n"
+
+    monkeypatch.setattr(npubresolver.settings, "PUBLIC_IP", "auto")
+    monkeypatch.setattr(
+        npubresolver.urllib.request,
+        "urlopen",
+        lambda url, timeout: FakeResponse(),
+    )
+    get_public_ip.cache_clear()
+
+    try:
+        assert get_public_ip() == "203.0.113.10"
+    finally:
+        get_public_ip.cache_clear()

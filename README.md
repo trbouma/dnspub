@@ -62,12 +62,18 @@ Settings can be supplied in `.env`. Useful values include:
 ```dotenv
 DNS_HOST=0.0.0.0
 DNS_PORT=53
-PUBLIC_IP=127.0.0.1
+PUBLIC_IP=auto
+PUBLIC_IP_DISCOVERY_URL=https://api.ipify.org
+PUBLIC_IP_DISCOVERY_TIMEOUT=3.0
 NOSTR_FETCH_TIMEOUT=1.0
 NOSTR_RELAYS=["wss://relay.damus.io","wss://nos.lol"]
 CACHE_ACTIVATED=true
 DB_PATH=data/npubcache.sqlite3
 ```
+
+Set `PUBLIC_IP=auto` to discover and validate the server's public IPv4 address
+at startup. Set an explicit IPv4 address to avoid relying on the external
+discovery service.
 
 For a Poetry-based server deployment:
 
